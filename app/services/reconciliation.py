@@ -71,6 +71,8 @@ class ReconciliationService:
 
     def finish(self, run: Reconciliation) -> Reconciliation:
         """Finalize a run from server-side diff state, never caller-provided truth."""
+        # Production/test sessions use autoflush=False, so persist pending comparisons first.
+        self.db.flush()
         unresolved = self.db.scalar(
             select(ReconciliationDiff)
             .where(
