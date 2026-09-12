@@ -13,7 +13,7 @@ from app.enums import DataQualityLevel, OrderEventType, OrderStatus
 from app.models import Account, DataQuality, Order
 from app.schemas import OrderCreate, OrderModify, OrderView
 from app.security import InternalPrincipal, require_internal_auth
-from app.services.order_service import OrderService
+from app.services.order_service import EmergencyConfirmationRequired, OrderService
 from app.services.risk_service import RiskService
 from app.services.simulation_broker import SimulationBroker, WaitingForNav
 
@@ -116,6 +116,8 @@ def risk_order(
             "hard_blocks": result.hard_blocks,
             "warnings": result.warnings,
             "requires_emergency_confirmation": result.requires_emergency_confirmation,
+            "lot_allocation": result.lot_allocation,
+            "penalty_fee_snapshot": result.penalty_fee_snapshot,
             "data_quality": data_quality.value,
             "checked_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -139,6 +141,7 @@ def risk_order(
 def approve_order(
     order_id: str,
     version: int,
+    emergency_confirm: bool = False,
     db: Session = Depends(get_db),
     principal: InternalPrincipal = Depends(require_internal_auth),
 ):
@@ -147,12 +150,15 @@ def approve_order(
             order_id,
             version,
             actor_id=principal.actor_id,
+            emergency_confirm=emergency_confirm,
         )
     except KeyError as exc:
         db.rollback()
         raise HTTPException(404, "order not found") from exc
     except StaleOrderVersion as exc:
         db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except EmergencyConfirmationRequired as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         db.rollback()
