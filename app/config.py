@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     app_env: str = "prod"
     database_url: str = "sqlite:///./jijin.db"
     timezone: str = "Asia/Shanghai"
+    log_level: str = "INFO"
     internal_api_token: str = ""
     live_trading_enabled: bool = False
 
@@ -48,6 +49,8 @@ class Settings(BaseSettings):
         env = self.app_env.lower().strip()
         if env not in {"prod", "staging", "dev", "test"}:
             raise RuntimeError(f"unsupported APP_ENV={self.app_env!r}")
+        if self.log_level.upper().strip() not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            raise RuntimeError(f"unsupported LOG_LEVEL={self.log_level!r}")
         if self.live_trading_enabled:
             raise RuntimeError(
                 "V1.2.2 does not implement live trading; LIVE_TRADING_ENABLED must be false"
