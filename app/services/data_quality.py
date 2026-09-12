@@ -176,11 +176,7 @@ class DataQualityGate:
                 if snapshot
                 else False,
                 rule_observed_at=snapshot.observed_at if snapshot else None,
-                rule_sla_seconds=(
-                    int(details.get("source_sla_seconds") or source.sla_seconds)
-                    if snapshot and source
-                    else None
-                ),
+                rule_sla_seconds=source.sla_seconds if snapshot and source else None,
                 source_enabled=bool(source and source.enabled) if snapshot else False,
                 rule_snapshot_effective=bool(details.get("effective", False))
                 if snapshot
