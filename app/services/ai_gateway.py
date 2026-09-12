@@ -4,13 +4,17 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime, time as dt_time, timezone
+from decimal import Decimal
 from typing import Any, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
+from app.hardening_models import AIUsageLedger
 from app.models import ModelCallLog
 
 T = TypeVar("T", bound=BaseModel)
@@ -22,9 +26,15 @@ class ProviderConfig:
     base_url: str
     api_key: str
     model: str
+    input_cost_per_million: Decimal = Decimal("0")
+    output_cost_per_million: Decimal = Decimal("0")
 
 
 class AIUnavailable(RuntimeError):
+    pass
+
+
+class AIQuotaExceeded(RuntimeError):
     pass
 
 
@@ -101,8 +111,18 @@ class OpenAICompatibleProvider:
 
 
 class ModelGateway:
-    def __init__(self, settings: Settings, db: Session | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        db: Session | None = None,
+        *,
+        quota_subject: str = "system",
+        request_id: str | None = None,
+    ):
+        self.settings = settings
         self.db = db
+        self.quota_subject = quota_subject or "system"
+        self.request_id = request_id
         self.providers = {
             "kimi": OpenAICompatibleProvider(
                 ProviderConfig(
@@ -110,6 +130,8 @@ class ModelGateway:
                     settings.kimi_base_url,
                     settings.kimi_api_key,
                     settings.kimi_model,
+                    Decimal(str(settings.kimi_input_cost_per_million)),
+                    Decimal(str(settings.kimi_output_cost_per_million)),
                 )
             ),
             "qwen": OpenAICompatibleProvider(
@@ -118,6 +140,8 @@ class ModelGateway:
                     settings.qwen_base_url,
                     settings.qwen_api_key,
                     settings.qwen_model,
+                    Decimal(str(settings.qwen_input_cost_per_million)),
+                    Decimal(str(settings.qwen_output_cost_per_million)),
                 )
             ),
             "deepseek": OpenAICompatibleProvider(
@@ -126,9 +150,136 @@ class ModelGateway:
                     settings.deepseek_base_url,
                     settings.deepseek_api_key,
                     settings.deepseek_model,
+                    Decimal(str(settings.deepseek_input_cost_per_million)),
+                    Decimal(str(settings.deepseek_output_cost_per_million)),
                 )
             ),
         }
+
+    def _session_factory(self):
+        if self.db is None:
+            return None
+        return sessionmaker(
+            bind=self.db.get_bind(),
+            autoflush=False,
+            expire_on_commit=False,
+        )
+
+    @staticmethod
+    def _utc_day_start(now: datetime | None = None) -> datetime:
+        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        return datetime.combine(current.date(), dt_time.min, tzinfo=timezone.utc)
+
+    def _estimated_cost(self, provider: str, usage: dict[str, Any]) -> Decimal:
+        cfg = self.providers[provider].cfg
+        input_tokens = Decimal(str(usage.get("prompt_tokens") or 0))
+        output_tokens = Decimal(str(usage.get("completion_tokens") or 0))
+        return (
+            input_tokens * cfg.input_cost_per_million
+            + output_tokens * cfg.output_cost_per_million
+        ) / Decimal("1000000")
+
+    def _write_usage(
+        self,
+        *,
+        provider: str,
+        role_name: str,
+        input_chars: int,
+        usage: dict[str, Any],
+        estimated_cost: Decimal,
+        success: bool,
+        denied: bool,
+        error: str,
+    ) -> None:
+        factory = self._session_factory()
+        if factory is None:
+            return
+        cfg = self.providers[provider].cfg
+        try:
+            with factory() as usage_db:
+                usage_db.add(
+                    AIUsageLedger(
+                        quota_subject=self.quota_subject,
+                        request_id=self.request_id,
+                        provider=provider,
+                        model=cfg.model,
+                        role_name=role_name,
+                        input_chars=input_chars,
+                        input_tokens=usage.get("prompt_tokens"),
+                        output_tokens=usage.get("completion_tokens"),
+                        estimated_cost=estimated_cost,
+                        cost_currency=self.settings.ai_cost_currency,
+                        success=success,
+                        denied=denied,
+                        error=error,
+                    )
+                )
+                usage_db.commit()
+        except Exception:
+            return
+
+    def _enforce_quota(self, provider: str, role_name: str, input_chars: int) -> None:
+        if input_chars > self.settings.ai_max_request_chars:
+            message = (
+                f"AI request too large: {input_chars} chars > "
+                f"{self.settings.ai_max_request_chars}"
+            )
+            self._write_usage(
+                provider=provider,
+                role_name=role_name,
+                input_chars=input_chars,
+                usage={},
+                estimated_cost=Decimal("0"),
+                success=False,
+                denied=True,
+                error=message,
+            )
+            raise AIQuotaExceeded(message)
+
+        factory = self._session_factory()
+        if factory is None:
+            return
+        day_start = self._utc_day_start()
+        with factory() as quota_db:
+            used_calls = quota_db.scalar(
+                select(func.count(AIUsageLedger.id)).where(
+                    AIUsageLedger.quota_subject == self.quota_subject,
+                    AIUsageLedger.created_at >= day_start,
+                    AIUsageLedger.denied.is_(False),
+                )
+            ) or 0
+            used_cost = quota_db.scalar(
+                select(func.coalesce(func.sum(AIUsageLedger.estimated_cost), 0)).where(
+                    AIUsageLedger.quota_subject == self.quota_subject,
+                    AIUsageLedger.created_at >= day_start,
+                    AIUsageLedger.denied.is_(False),
+                )
+            ) or Decimal("0")
+
+        if used_calls >= self.settings.ai_daily_max_calls_per_subject:
+            message = "AI daily call quota exceeded"
+        elif (
+            self.settings.ai_daily_max_estimated_cost > 0
+            and Decimal(str(used_cost)) >= Decimal(str(self.settings.ai_daily_max_estimated_cost))
+        ):
+            message = (
+                f"AI daily estimated-cost quota exceeded "
+                f"({self.settings.ai_cost_currency})"
+            )
+        else:
+            return
+
+        self._write_usage(
+            provider=provider,
+            role_name=role_name,
+            input_chars=input_chars,
+            usage={},
+            estimated_cost=Decimal("0"),
+            success=False,
+            denied=True,
+            error=message,
+        )
+        raise AIQuotaExceeded(message)
 
     def _write_log(
         self,
@@ -139,18 +290,15 @@ class ModelGateway:
         input_hash: str,
         success: bool,
         usage: dict[str, Any],
+        estimated_cost: Decimal,
         error: str,
     ) -> None:
-        if self.db is None:
+        factory = self._session_factory()
+        if factory is None:
             return
         cfg = self.providers[provider].cfg
-        LocalSession = sessionmaker(
-            bind=self.db.get_bind(),
-            autoflush=False,
-            expire_on_commit=False,
-        )
         try:
-            with LocalSession() as log_db:
+            with factory() as log_db:
                 log_db.add(
                     ModelCallLog(
                         provider=provider,
@@ -163,6 +311,7 @@ class ModelGateway:
                         latency_ms=int(usage.get("latency_ms", 0)),
                         input_tokens=usage.get("prompt_tokens"),
                         output_tokens=usage.get("completion_tokens"),
+                        estimated_cost=estimated_cost,
                         error=error,
                     )
                 )
@@ -183,12 +332,16 @@ class ModelGateway:
         if provider not in self.providers:
             raise AIUnavailable(f"unknown provider: {provider}")
 
+        input_chars = len(system) + len(user)
+        self._enforce_quota(provider, role_name, input_chars)
         input_hash = hashlib.sha256((system + "\n" + user).encode()).hexdigest()
         success = False
         error = ""
         usage: dict[str, Any] = {}
+        estimated_cost = Decimal("0")
         try:
             raw, usage = self.providers[provider].complete_json(system, user)
+            estimated_cost = self._estimated_cost(provider, usage)
             result = schema.model_validate(raw)
             success = True
             return result
@@ -210,5 +363,16 @@ class ModelGateway:
                 input_hash,
                 success,
                 usage,
+                estimated_cost,
                 error,
+            )
+            self._write_usage(
+                provider=provider,
+                role_name=role_name,
+                input_chars=input_chars,
+                usage=usage,
+                estimated_cost=estimated_cost,
+                success=success,
+                denied=False,
+                error=error,
             )
