@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.enums import DataQualityLevel, OrderSide, OrderStatus
 
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.2.1"
 
 
 class Evidence(BaseModel):
@@ -37,9 +37,9 @@ class DecisionAction(BaseModel):
     action: OrderSide
     fund_code: str | None = None
     convert_to_fund_code: str | None = None
-    amount: Decimal | None = Field(default=None, ge=0)
-    shares: Decimal | None = Field(default=None, ge=0)
-    ratio: Decimal | None = Field(default=None, ge=0, le=1)
+    amount: Decimal | None = Field(default=None, gt=0)
+    shares: Decimal | None = Field(default=None, gt=0)
+    ratio: Decimal | None = Field(default=None, gt=0, le=1)
     evidence_ids: list[str] = Field(default_factory=list)
     reason: str
     risk_notes: list[str] = Field(default_factory=list)
@@ -73,22 +73,41 @@ class OrderCreate(BaseModel):
     fund_id: str | None = None
     convert_to_fund_id: str | None = None
     side: OrderSide
-    amount: Decimal | None = None
-    shares: Decimal | None = None
-    ratio: Decimal | None = None
+    amount: Decimal | None = Field(default=None, gt=0)
+    shares: Decimal | None = Field(default=None, gt=0)
+    ratio: Decimal | None = Field(default=None, gt=0, le=1)
     reason: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
-    idempotency_key: str
+    idempotency_key: str = Field(min_length=8, max_length=128)
     session_id: str | None = None
     emergency_exit: bool = False
 
+    @model_validator(mode="after")
+    def validate_order(self):
+        if self.side == OrderSide.CONVERT:
+            raise ValueError("CONVERT_NOT_SUPPORTED: V1.2.1 暂不支持基金转换")
+        if self.side in {OrderSide.BUY, OrderSide.SELL}:
+            if not self.fund_id:
+                raise ValueError("交易单必须指定 fund_id")
+            if sum(x is not None for x in (self.amount, self.shares, self.ratio)) != 1:
+                raise ValueError("交易单必须且只能指定 amount/shares/ratio 其中一个")
+        return self
+
 
 class OrderModify(BaseModel):
-    expected_version: int
-    amount: Decimal | None = None
-    shares: Decimal | None = None
-    ratio: Decimal | None = None
+    expected_version: int = Field(ge=1)
+    amount: Decimal | None = Field(default=None, gt=0)
+    shares: Decimal | None = Field(default=None, gt=0)
+    ratio: Decimal | None = Field(default=None, gt=0, le=1)
     reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_modify(self):
+        if all(x is None for x in (self.amount, self.shares, self.ratio, self.reason)):
+            raise ValueError("修改请求至少包含一个字段")
+        if sum(x is not None for x in (self.amount, self.shares, self.ratio)) > 1:
+            raise ValueError("amount/shares/ratio 一次只能修改一个")
+        return self
 
 
 class OrderView(BaseModel):
