@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI 场外基金公司",
-    version="1.2.1",
+    version="1.2.2",
     description="个人研究 / 前瞻模拟盘。默认不接自动实盘，不构成投资建议。",
     lifespan=lifespan,
 )
