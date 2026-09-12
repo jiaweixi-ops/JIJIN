@@ -129,7 +129,7 @@ def test_create_order_after_safe_cutoff_is_rejected(db):
                 fund_id=fund.id,
                 side=OrderSide.BUY,
                 amount=Decimal("1000"),
-                idempotency_key="late-k1",
+                idempotency_key="late-key1",
             ),
             now=after_cutoff,
         )
