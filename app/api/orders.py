@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -16,7 +15,7 @@ from app.schemas import OrderCreate, OrderModify, OrderView
 from app.security import InternalPrincipal, require_internal_auth
 from app.services.order_service import OrderService
 from app.services.risk_service import RiskService
-from app.services.simulation_broker import SimulationBroker
+from app.services.simulation_broker import SimulationBroker, WaitingForNav
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -180,7 +179,6 @@ def simulate_submit(
 @router.post("/{order_id}/simulate-confirm")
 def simulate_confirm(
     order_id: str,
-    nav: Decimal,
     db: Session = Depends(get_db),
     principal: InternalPrincipal = Depends(require_internal_auth),
 ):
@@ -189,13 +187,17 @@ def simulate_confirm(
     if not order:
         raise HTTPException(404, "order not found")
     try:
-        fill = SimulationBroker(db, OrderService(db, get_settings())).confirm(order, nav)
+        fill = SimulationBroker(db, OrderService(db, get_settings())).confirm_from_nav(order)
         return {
             "fill_id": fill.id,
             "shares": str(fill.shares),
             "net_amount": str(fill.net_amount),
             "fee": str(fill.fee_amount),
+            "confirmation_ref": fill.confirmation_ref,
         }
+    except WaitingForNav as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc
