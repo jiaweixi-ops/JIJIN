@@ -149,6 +149,7 @@ class FundDataIngestionService:
             details=details,
         )
         self.db.add(record)
+        self.db.flush()
 
         if effective:
             fund.subscription_open = snapshot.subscription_open
