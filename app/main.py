@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import decisions, feishu, health, orders, portfolio, reconciliation
+from app.api import credentials, data_quality, decisions, feishu, health, orders, portfolio, reconciliation
 from app.config import get_settings
 from app.db import verify_schema_current
 from app.observability import configure_logging, install_observability
@@ -18,10 +18,10 @@ _scheduler = None
 async def lifespan(app: FastAPI):
     global _scheduler
     settings = get_settings()
-    settings.validate_runtime()
     configure_logging(settings.log_level)
+    settings.validate_runtime()
     log.info(
-        "runtime_config_validated env=%s feishu_enabled=%s live_trading=%s",
+        "runtime config validated env=%s feishu_enabled=%s live_trading=%s",
         settings.app_env,
         settings.feishu_enabled,
         settings.live_trading_enabled,
@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
         _scheduler = build_scheduler()
         _scheduler.start()
     except Exception as exc:
-        log.exception("scheduler_unavailable error=%s", exc)
+        log.exception("scheduler unavailable: %s", exc)
     yield
     if _scheduler:
         _scheduler.shutdown(wait=False)
@@ -50,5 +50,7 @@ app.include_router(health.router)
 app.include_router(orders.router)
 app.include_router(portfolio.router)
 app.include_router(reconciliation.router)
+app.include_router(data_quality.router)
+app.include_router(credentials.router)
 app.include_router(decisions.router)
 app.include_router(feishu.router)
