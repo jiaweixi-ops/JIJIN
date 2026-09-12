@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     ai_cost_currency: str = "CNY"
     ai_max_source_chars: int = 100_000
     ai_max_request_chars: int = 120_000
+    ai_max_output_tokens: int = 4096
     ai_daily_max_calls_per_subject: int = 30
     ai_daily_max_estimated_cost: float = 50.0
     deepseek_input_cost_per_million: float = 0.0
@@ -86,6 +87,8 @@ class Settings(BaseSettings):
             )
         if self.ai_max_source_chars < 1 or self.ai_max_request_chars < 1:
             raise RuntimeError("AI request/source character limits must be positive")
+        if self.ai_max_output_tokens < 1:
+            raise RuntimeError("AI_MAX_OUTPUT_TOKENS must be >= 1")
         if self.ai_daily_max_calls_per_subject < 1:
             raise RuntimeError("AI_DAILY_MAX_CALLS_PER_SUBJECT must be >= 1")
         if self.ai_daily_max_estimated_cost < 0:
