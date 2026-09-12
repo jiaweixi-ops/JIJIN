@@ -14,7 +14,7 @@ python -m compileall -q app tests scripts alembic
 pytest
 ```
 
-Ruff 当前基线覆盖 correctness + bugbear：`E4/E7/E9/F/B`，并暂时忽略 FastAPI 声明式默认参数常见的 `B008`。`I/UP/DTZ/FURB` 等导入排序/现代化规则后续分批启用，避免一次性格式化或机械升级掩盖真实缺陷。
+Ruff 当前 Phase-1 门禁覆盖 `E9/F`：语法级错误、未定义名称、未使用/错误导入等 correctness 问题必须在 CI 阶段失败。`I/B/UP/DTZ/FURB` 等导入排序、Bugbear 与现代化规则保留到后续清理 PR 分批开启，避免为了“把 lint 一次清零”产生大面积机械改动，影响当前 hardening 的可审查性。
 
 CI 同时验证 SQLite/PostgreSQL Alembic migration，以及 Docker 镜像的非 root 用户和 HEALTHCHECK。
 
