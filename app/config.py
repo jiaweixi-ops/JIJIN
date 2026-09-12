@@ -50,7 +50,7 @@ class Settings(BaseSettings):
             raise RuntimeError(f"unsupported APP_ENV={self.app_env!r}")
         if self.live_trading_enabled:
             raise RuntimeError(
-                "V1.2.1 does not implement live trading; LIVE_TRADING_ENABLED must be false"
+                "V1.2.2 does not implement live trading; LIVE_TRADING_ENABLED must be false"
             )
         if env in {"prod", "staging"} and not self.internal_api_token:
             raise RuntimeError("INTERNAL_API_TOKEN is required outside dev/test")
