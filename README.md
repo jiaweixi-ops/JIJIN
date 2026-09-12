@@ -17,6 +17,10 @@
 - 飞书签名校验、防重放/回调幂等、交易卡片发送、会话绑定、自然语言修改及版本检查
 - 内部 API 使用服务凭证；人工审批必须使用绑定真实 `User` 的独立 `ApiCredential`，请求头不能自由伪造 actor
 - Alembic schema versioning；应用启动只校验数据库 revision，不再自动 `create_all`
+- Ruff 已进入 CI；SQLite / PostgreSQL migration 都有 CI 验证
+- Docker 以非 root 用户运行，带 `/ready` HEALTHCHECK；Compose 默认只绑定 `127.0.0.1`
+- Compose 不再内置弱口令，数据库和 API 都有 restart / 最小权限配置
+- HTTP 请求日志包含 request_id、route、status、duration；`/metrics/` 提供 Prometheus 基础指标
 - pytest 回归测试与 GitHub Actions
 
 ## 明确未支持
@@ -24,7 +28,6 @@
 - **CONVERT 基金转换：V1.2.2 直接拒绝创建**，避免未完成双腿结算时冻结份额；计划在后续版本单独实现。
 - 自动实盘交易。
 - 08:45 盘前简报、13:30 提醒、14:00 决策卡、20:30 月末任务目前仍只有调度入口；其中赎回在途现金结算已接入真实业务逻辑，其余业务编排继续迭代。
-- 完整 Docker 加固等工程化工作仍后置。
 
 ## 时间与数据规则
 
@@ -52,6 +55,34 @@ alembic upgrade head
 
 详细迁移 runbook：`docs/DB_MIGRATIONS_V1.2.2.md`。
 
+## Docker Compose
+
+容器运行建议使用单独模板：
+
+```bash
+cp .env.compose.example .env
+# 填写 INTERNAL_API_TOKEN / POSTGRES_PASSWORD / DATABASE_URL
+
+docker compose up --build -d
+```
+
+Compose 会先等待 PostgreSQL healthy，再运行一次 `alembic upgrade head`，migration 成功后才启动 API。API 默认仅绑定：
+
+```text
+127.0.0.1:8000
+```
+
+不要为了远程访问直接改成公网 `0.0.0.0:8000`；应放在受控反向代理、VPN 或 TLS 网关之后。
+
+健康与监控：
+
+- `/health`：进程 liveness
+- `/ready`：数据库 + Alembic readiness
+- `/metrics/`：Prometheus 基础 HTTP 指标
+- 响应头 `X-Request-ID`：请求追踪
+
+详细运行说明见 `docs/OPERATIONS_V1.2.2.md`。
+
 ## 快速开始
 
 ```bash
@@ -63,6 +94,7 @@ cp .env.example .env
 alembic upgrade head
 python scripts/seed_demo.py
 uvicorn app.main:app --reload
+ruff check .
 pytest
 ```
 
