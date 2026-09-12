@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.enums import DataQualityLevel, OrderSide, OrderStatus
 
@@ -121,5 +121,14 @@ class OrderView(BaseModel):
     cutoff_at: datetime | None
     expires_at: datetime | None
     reason: str
+
+    @field_validator("cutoff_at", "expires_at", mode="before")
+    @classmethod
+    def attach_utc_offset(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     model_config = {"from_attributes": True}
