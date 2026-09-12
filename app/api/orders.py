@@ -137,6 +137,8 @@ def approve_order(
     db: Session = Depends(get_db),
     principal: InternalPrincipal = Depends(require_internal_auth),
 ):
+    if not principal.actor_id:
+        raise HTTPException(403, "order approval requires an authenticated user credential")
     try:
         return OrderService(db, get_settings()).approve(
             order_id,
