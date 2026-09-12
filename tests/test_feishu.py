@@ -1,9 +1,17 @@
-from datetime import datetime
+import asyncio
+import json
+from datetime import datetime, timezone
 from decimal import Decimal
 
-from app.enums import OrderSide, OrderStatus
-from app.models import Fund, Order
+from fastapi import Request
+from sqlalchemy import select
+
+from app.api.feishu import feishu_events
+from app.config import Settings
+from app.enums import AccountType, OrderSide, OrderStatus, Role
+from app.models import Account, Fund, Order, User
 from app.schemas import OrderView
+from app.security_models import FeishuCallback
 from app.services.feishu import CommandParser, trade_card
 
 
@@ -59,3 +67,107 @@ def test_order_view_attaches_utc_offset_to_naive_persisted_timestamps():
     assert view.cutoff_at is not None
     assert view.cutoff_at.utcoffset() is not None
     assert view.model_dump(mode="json")["cutoff_at"].endswith("Z")
+
+
+def _request_with_body(body: bytes) -> Request:
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/feishu/events",
+            "headers": [],
+            "query_string": b"",
+            "server": ("testserver", 80),
+            "client": ("testclient", 1234),
+            "scheme": "http",
+        },
+        receive,
+    )
+
+
+def test_feishu_business_rejection_is_persisted_and_replay_is_idempotent(db, monkeypatch):
+    from app.api import feishu as feishu_api
+
+    settings = Settings(app_env="test", feishu_enabled=True)
+    monkeypatch.setattr(feishu_api, "get_settings", lambda: settings)
+    monkeypatch.setattr(feishu_api.FeishuSecurity, "verify_event", lambda *args: True)
+
+    user = User(
+        display_name="feishu-confirmer",
+        feishu_open_id="ou-expired",
+        role=Role.CONFIRMER,
+        active=True,
+    )
+    db.add(user)
+    db.flush()
+    account = Account(user_id=user.id, account_type=AccountType.SIMULATION)
+    fund = Fund(code="000777", name="过期测试基金", board="测试", share_class="C")
+    db.add_all([account, fund])
+    db.flush()
+    order = Order(
+        account_id=account.id,
+        fund_id=fund.id,
+        side=OrderSide.BUY,
+        status=OrderStatus.PENDING_CONFIRM,
+        version=1,
+        idempotency_key="expired-k1",
+        amount=Decimal("1000"),
+        expires_at=datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc),
+        reason="expired callback test",
+    )
+    db.add(order)
+    db.commit()
+
+    event_id = "evt-expired-order"
+    payload = {
+        "header": {"event_id": event_id},
+        "event": {
+            "operator": {"operator_id": {"open_id": user.feishu_open_id}},
+            "action": {
+                "value": {
+                    "order_id": order.id,
+                    "version": 1,
+                    "action": "confirm",
+                }
+            },
+        },
+    }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    first = asyncio.run(
+        feishu_events(
+            _request_with_body(body),
+            db=db,
+            x_lark_request_timestamp="1",
+            x_lark_request_nonce="nonce-1",
+            x_lark_signature="sig",
+        )
+    )
+    assert first.status_code == 400
+    first_body = json.loads(first.body)
+    assert first_body["ok"] is False
+    assert "订单已过期" in first_body["message"]
+
+    callback = db.scalar(select(FeishuCallback).where(FeishuCallback.event_id == event_id))
+    assert callback is not None
+    assert callback.response == first_body
+
+    replay = asyncio.run(
+        feishu_events(
+            _request_with_body(body),
+            db=db,
+            x_lark_request_timestamp="1",
+            x_lark_request_nonce="nonce-1",
+            x_lark_signature="sig",
+        )
+    )
+    assert replay == first_body
