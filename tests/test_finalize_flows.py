@@ -73,6 +73,35 @@ def test_due_redemption_cash_moves_from_in_transit_to_available(db):
     assert Decimal(account.available_cash) == Decimal("1128.05")
 
 
+def test_reconciliation_finish_derives_status_from_unresolved_diffs(db):
+    user = User(display_name="reviewer", role=Role.ADMIN)
+    db.add(user)
+    db.flush()
+    account = Account(user_id=user.id, account_type=AccountType.SIMULATION)
+    db.add(account)
+    db.flush()
+
+    svc = ReconciliationService(db)
+    clean_run = svc.create_run(account.id, date(2026, 1, 5), "clean")
+    clean_run = svc.finish(clean_run)
+    assert clean_run.status == ReconciliationStatus.MATCHED
+    assert clean_run.summary["all_ok"] is True
+    assert clean_run.summary["derived_from_diffs"] is True
+
+    diff_run = svc.create_run(account.id, date(2026, 1, 6), "diff")
+    assert not svc.compare_decimal(
+        diff_run,
+        "cash",
+        "available_cash",
+        Decimal("100"),
+        Decimal("99"),
+        Decimal("0.01"),
+    )
+    diff_run = svc.finish(diff_run)
+    assert diff_run.status == ReconciliationStatus.BLOCKING
+    assert diff_run.summary["all_ok"] is False
+
+
 def test_resolving_last_blocking_diff_unblocks_reconciliation(db):
     user = User(display_name="reviewer", role=Role.ADMIN)
     db.add(user)
@@ -91,7 +120,7 @@ def test_resolving_last_blocking_diff_unblocks_reconciliation(db):
         Decimal("99"),
         Decimal("0.01"),
     )
-    svc.finish(run, all_ok=False)
+    svc.finish(run)
     diff = db.scalar(
         select(ReconciliationDiff).where(ReconciliationDiff.reconciliation_id == run.id)
     )
