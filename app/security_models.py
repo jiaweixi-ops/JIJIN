@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -28,6 +28,7 @@ class FeishuCallback(Base):
         DateTime(timezone=True), default=utcnow, nullable=False
     )
     response: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status_code: Mapped[int] = mapped_column(Integer, default=200, nullable=False)
 
 
 class ApiCredential(Base):
