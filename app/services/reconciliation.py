@@ -69,9 +69,23 @@ class ReconciliationService:
             )
         return ok
 
-    def finish(self, run: Reconciliation, all_ok: bool) -> Reconciliation:
+    def finish(self, run: Reconciliation) -> Reconciliation:
+        """Finalize a run from server-side diff state, never caller-provided truth."""
+        unresolved = self.db.scalar(
+            select(ReconciliationDiff)
+            .where(
+                ReconciliationDiff.reconciliation_id == run.id,
+                ReconciliationDiff.resolved.is_(False),
+            )
+            .limit(1)
+        )
+        all_ok = unresolved is None
         run.status = ReconciliationStatus.MATCHED if all_ok else ReconciliationStatus.BLOCKING
-        run.summary = {"all_ok": all_ok}
+        run.summary = {
+            **(run.summary or {}),
+            "all_ok": all_ok,
+            "derived_from_diffs": True,
+        }
         self.db.commit()
         return run
 
