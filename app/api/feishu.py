@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -13,11 +13,18 @@ from app.config import get_settings
 from app.db import get_db
 from app.domain.order_state import StaleOrderVersion, assert_version
 from app.enums import OrderEventType
-from app.models import AuditLog, FeishuSession, Order, User
+from app.models import AuditLog, FeishuSession, Fund, NotificationLog, Order, User
 from app.schemas import OrderModify
+from app.security import InternalPrincipal, require_internal_auth
 from app.security_models import FeishuCallback
-from app.services.feishu import CommandParser, FeishuSecurity, ROLE_PERMISSIONS
-from app.services.order_service import OrderService
+from app.services.feishu import (
+    CommandParser,
+    FeishuClient,
+    FeishuSecurity,
+    ROLE_PERMISSIONS,
+    trade_card,
+)
+from app.services.order_service import EmergencyConfirmationRequired, OrderService
 
 router = APIRouter(prefix="/feishu", tags=["feishu"])
 
@@ -39,6 +46,35 @@ def _user_from_open_id(db: Session, open_id: str) -> User:
     if not user:
         raise HTTPException(403, "未绑定或已禁用的飞书用户")
     return user
+
+
+def _bind_session(
+    db: Session,
+    open_id: str,
+    order: Order,
+    chat_id: str | None = None,
+) -> FeishuSession:
+    settings = get_settings()
+    session = db.scalar(
+        select(FeishuSession)
+        .where(FeishuSession.feishu_open_id == open_id)
+        .order_by(FeishuSession.updated_at.desc())
+    )
+    if session is None:
+        session = FeishuSession(feishu_open_id=open_id)
+        db.add(session)
+    session.chat_id = chat_id or session.chat_id
+    session.current_order_id = order.id
+    session.current_order_version = order.version
+    session.context = {
+        **(session.context or {}),
+        "bound_at": _utcnow().isoformat(),
+        "order_id": order.id,
+        "order_version": order.version,
+    }
+    session.expires_at = _utcnow() + timedelta(minutes=settings.feishu_session_ttl_minutes)
+    db.flush()
+    return session
 
 
 def _active_session(db: Session, open_id: str) -> FeishuSession:
@@ -176,6 +212,141 @@ def _extract_text(payload: dict) -> tuple[str | None, str | None]:
     return open_id, data.get("text")
 
 
+def _extract_action(payload: dict) -> tuple[str | None, str | None, dict | None]:
+    event = payload.get("event") or {}
+    sender = event.get("sender") or {}
+    sender_id = sender.get("sender_id") or {}
+    operator = event.get("operator") or {}
+    operator_id = operator.get("operator_id") or {}
+    open_id = sender_id.get("open_id") or operator_id.get("open_id")
+    context = event.get("context") or {}
+    message = event.get("message") or {}
+    chat_id = context.get("open_chat_id") or message.get("chat_id")
+    action = event.get("action") or {}
+    value = action.get("value")
+    return open_id, chat_id, value if isinstance(value, dict) else None
+
+
+def _handle_card_action(
+    db: Session,
+    open_id: str,
+    chat_id: str | None,
+    value: dict,
+) -> dict:
+    user = _user_from_open_id(db, open_id)
+    order_id = str(value.get("order_id") or "")
+    version = int(value.get("version") or 0)
+    action = str(value.get("action") or "")
+    order = db.get(Order, order_id)
+    if not order:
+        raise HTTPException(404, "order not found")
+    try:
+        assert_version(order.version, version)
+    except StaleOrderVersion as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    session = _bind_session(db, open_id, order, chat_id)
+    if action == "why":
+        db.commit()
+        return {"reason": order.reason, "evidence_ids": order.evidence_ids}
+    if action == "cancel":
+        if "modify" not in ROLE_PERMISSIONS[user.role]:
+            raise HTTPException(403, "无交易编辑权限")
+        OrderService(db, get_settings()).apply_event(order, OrderEventType.CANCEL, user.id)
+        session.current_order_version = order.version
+        _audit(db, user, "feishu.card_cancel", order)
+        db.commit()
+        return {"message": "订单已取消", "order_id": order.id, "version": order.version}
+    if action == "confirm":
+        if "confirm" not in ROLE_PERMISSIONS[user.role]:
+            raise HTTPException(403, "无模拟交易确认权限")
+        svc = OrderService(db, get_settings())
+        try:
+            order = svc.approve(order.id, version, actor_id=user.id)
+        except EmergencyConfirmationRequired as exc:
+            order = db.get(Order, order.id)
+            if order:
+                session.current_order_version = order.version
+                db.commit()
+            return {
+                "message": str(exc),
+                "order_id": order_id,
+                "version": order.version if order else version,
+                "emergency_confirmation_required": True,
+            }
+        session.current_order_version = order.version
+        _audit(db, user, "feishu.card_confirm", order)
+        db.commit()
+        return {"message": "模拟订单已批准", "order_id": order.id, "version": order.version}
+
+    db.commit()
+    return {"message": "交易会话已绑定", "order_id": order.id, "version": order.version}
+
+
+@router.post("/orders/{order_id}/send-card")
+def send_order_card(
+    order_id: str,
+    open_id: str,
+    chat_id: str | None = None,
+    db: Session = Depends(get_db),
+    _: InternalPrincipal = Depends(require_internal_auth),
+):
+    settings = get_settings()
+    if not settings.feishu_enabled:
+        raise HTTPException(503, "Feishu integration is disabled")
+    if not settings.feishu_webhook_url:
+        raise HTTPException(503, "Feishu webhook is not configured")
+    _user_from_open_id(db, open_id)
+    order = db.get(Order, order_id)
+    if not order or not order.fund_id:
+        raise HTTPException(404, "order not found")
+    fund = db.get(Fund, order.fund_id)
+    if not fund:
+        raise HTTPException(404, "fund not found")
+
+    card = trade_card(
+        order,
+        fund,
+        risk_status="通过" if (order.risk_snapshot or {}).get("passed") else "待风控",
+        timezone_name=settings.timezone,
+    )
+    try:
+        FeishuClient(settings).send_webhook(card)
+    except Exception as exc:
+        db.add(
+            NotificationLog(
+                channel="feishu",
+                recipient=open_id,
+                message_type="trade_card",
+                success=False,
+                payload={"order_id": order.id, "version": order.version},
+                error=str(exc),
+            )
+        )
+        db.commit()
+        raise HTTPException(502, "failed to send Feishu trade card") from exc
+
+    session = _bind_session(db, open_id, order, chat_id)
+    db.add(
+        NotificationLog(
+            channel="feishu",
+            recipient=open_id,
+            message_type="trade_card",
+            success=True,
+            payload={"order_id": order.id, "version": order.version},
+        )
+    )
+    db.commit()
+    return {
+        "sent": True,
+        "order_id": order.id,
+        "version": order.version,
+        "session_expires_at": _as_utc(session.expires_at).isoformat()
+        if session.expires_at
+        else None,
+    }
+
+
 @router.post("/events")
 async def feishu_events(
     request: Request,
@@ -229,10 +400,14 @@ async def feishu_events(
         prior = db.scalar(select(FeishuCallback).where(FeishuCallback.event_id == event_id))
         return (prior.response if prior else None) or {"ok": True, "duplicate": True}
 
-    open_id, text = _extract_text(payload)
     response: dict = {"ok": True}
-    if open_id and text:
-        response = _handle_command(db, open_id, text)
+    action_open_id, chat_id, action_value = _extract_action(payload)
+    if action_open_id and action_value:
+        response = _handle_card_action(db, action_open_id, chat_id, action_value)
+    else:
+        open_id, text = _extract_text(payload)
+        if open_id and text:
+            response = _handle_command(db, open_id, text)
 
     callback.response = response
     db.commit()
