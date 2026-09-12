@@ -77,8 +77,13 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "V1.2.2 does not implement live trading; LIVE_TRADING_ENABLED must be false"
             )
-        if env in {"prod", "staging"} and not self.internal_api_token:
-            raise RuntimeError("INTERNAL_API_TOKEN is required outside dev/test")
+        if env in {"prod", "staging"}:
+            if not self.internal_api_token:
+                raise RuntimeError("INTERNAL_API_TOKEN is required outside dev/test")
+            if not self.api_credential_pepper:
+                raise RuntimeError("API_CREDENTIAL_PEPPER is required outside dev/test")
+            if self.internal_api_token == self.api_credential_pepper:
+                raise RuntimeError("INTERNAL_API_TOKEN and API_CREDENTIAL_PEPPER must be different")
         if self.api_credential_default_ttl_days < 1:
             raise RuntimeError("API_CREDENTIAL_DEFAULT_TTL_DAYS must be >= 1")
         if self.api_credential_max_ttl_days < self.api_credential_default_ttl_days:
