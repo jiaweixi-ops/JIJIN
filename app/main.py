@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from app.api import decisions, feishu, health, orders, portfolio, reconciliation
 from app.config import get_settings
-from app.db import init_db
+from app.db import verify_schema_current
 
 log = logging.getLogger(__name__)
 _scheduler = None
@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
         settings.feishu_enabled,
         settings.live_trading_enabled,
     )
-    init_db()
+    verify_schema_current()
     try:
         from app.services.scheduler import build_scheduler
 
