@@ -28,6 +28,7 @@ class ProviderConfig:
     model: str
     input_cost_per_million: Decimal = Decimal("0")
     output_cost_per_million: Decimal = Decimal("0")
+    max_output_tokens: int = 4096
 
 
 class AIUnavailable(RuntimeError):
@@ -77,6 +78,7 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
             "temperature": temperature,
+            "max_tokens": self.cfg.max_output_tokens,
             "response_format": {"type": "json_object"},
         }
         started = time.perf_counter()
@@ -132,6 +134,7 @@ class ModelGateway:
                     settings.kimi_model,
                     Decimal(str(settings.kimi_input_cost_per_million)),
                     Decimal(str(settings.kimi_output_cost_per_million)),
+                    settings.ai_max_output_tokens,
                 )
             ),
             "qwen": OpenAICompatibleProvider(
@@ -142,6 +145,7 @@ class ModelGateway:
                     settings.qwen_model,
                     Decimal(str(settings.qwen_input_cost_per_million)),
                     Decimal(str(settings.qwen_output_cost_per_million)),
+                    settings.ai_max_output_tokens,
                 )
             ),
             "deepseek": OpenAICompatibleProvider(
@@ -152,6 +156,7 @@ class ModelGateway:
                     settings.deepseek_model,
                     Decimal(str(settings.deepseek_input_cost_per_million)),
                     Decimal(str(settings.deepseek_output_cost_per_million)),
+                    settings.ai_max_output_tokens,
                 )
             ),
         }
@@ -177,6 +182,19 @@ class ModelGateway:
         return (
             input_tokens * cfg.input_cost_per_million
             + output_tokens * cfg.output_cost_per_million
+        ) / Decimal("1000000")
+
+    def _projected_max_cost(self, provider: str, input_chars: int) -> Decimal:
+        """Conservative pre-call budget reservation.
+
+        We treat one input character as up to one token and reserve the configured
+        maximum output tokens. This intentionally overestimates common prompts so
+        a configured daily cost ceiling fails closed rather than overshooting.
+        """
+        cfg = self.providers[provider].cfg
+        return (
+            Decimal(input_chars) * cfg.input_cost_per_million
+            + Decimal(cfg.max_output_tokens) * cfg.output_cost_per_million
         ) / Decimal("1000000")
 
     def _write_usage(
@@ -256,14 +274,16 @@ class ModelGateway:
                 )
             ) or Decimal("0")
 
+        projected = self._projected_max_cost(provider, input_chars)
         if used_calls >= self.settings.ai_daily_max_calls_per_subject:
             message = "AI daily call quota exceeded"
         elif (
             self.settings.ai_daily_max_estimated_cost > 0
-            and Decimal(str(used_cost)) >= Decimal(str(self.settings.ai_daily_max_estimated_cost))
+            and Decimal(str(used_cost)) + projected
+            > Decimal(str(self.settings.ai_daily_max_estimated_cost))
         ):
             message = (
-                f"AI daily estimated-cost quota exceeded "
+                f"AI daily estimated-cost quota would be exceeded "
                 f"({self.settings.ai_cost_currency})"
             )
         else:
