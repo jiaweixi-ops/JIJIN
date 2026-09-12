@@ -11,9 +11,10 @@ from app.config import get_settings
 from app.db import get_db
 from app.enums import DataQualityLevel
 from app.models import Fund
+from app.observability import request_id_var
 from app.schemas import DecisionPlan, ResearchPacket
 from app.security import InternalPrincipal, require_internal_auth
-from app.services.ai_gateway import AIUnavailable, ModelGateway
+from app.services.ai_gateway import AIQuotaExceeded, AIUnavailable, ModelGateway
 from app.services.data_quality import DataQualityGate
 from app.services.decision_engine import DecisionEngine
 
@@ -31,15 +32,27 @@ class DecisionRunRequest(BaseModel):
 def run_decision_pipeline(
     payload: DecisionRunRequest,
     db: Session = Depends(get_db),
-    _: InternalPrincipal = Depends(require_internal_auth),
+    principal: InternalPrincipal = Depends(require_internal_auth),
 ):
     settings = get_settings()
+    if len(payload.source_material) > settings.ai_max_source_chars:
+        raise HTTPException(
+            413,
+            f"source_material exceeds AI_MAX_SOURCE_CHARS={settings.ai_max_source_chars}",
+        )
+
     fund = db.get(Fund, payload.fund_id)
     if not fund:
         raise HTTPException(404, "fund not found")
 
     quality = DataQualityGate(settings).evaluate_fund(db, fund)
-    engine = DecisionEngine(ModelGateway(settings, db))
+    gateway = ModelGateway(
+        settings,
+        db,
+        quota_subject=principal.actor_id or "system",
+        request_id=request_id_var.get(),
+    )
+    engine = DecisionEngine(gateway)
 
     if quality.research_quality == DataQualityLevel.RED:
         research = ResearchPacket(
@@ -59,5 +72,7 @@ def run_decision_pipeline(
             payload.python_metrics,
             quality.research_quality,
         )
+    except AIQuotaExceeded as exc:
+        raise HTTPException(429, f"AI quota exceeded: {exc}") from exc
     except AIUnavailable as exc:
         raise HTTPException(503, f"AI research pipeline unavailable: {exc}") from exc
