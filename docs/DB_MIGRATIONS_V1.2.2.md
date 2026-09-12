@@ -15,11 +15,9 @@
 
 应用启动阶段会校验 `alembic_version`。数据库不是 Alembic 管理状态，或 revision 落后/超前于当前代码 head 时，服务会 fail-fast，而不是尝试自动建表或补列。
 
-## 首个接管 revision
+## Revision 20260912_01：接管基线
 
-Revision: `20260912_01`
-
-它同时支持两种场景：
+它同时支持两种场景。
 
 ### 新数据库
 
@@ -33,6 +31,17 @@ Revision: `20260912_01`
 - 缺失的 baseline 表按 frozen metadata 补齐。
 - 如果 `feishu_callback` 已存在但没有 `status_code`，增加 `status_code INTEGER NOT NULL DEFAULT 200`。
 - 已有 callback 记录得到默认状态码 200。
+
+## Revision 20260912_02：凭证生命周期与 AI 用量
+
+当前代码 head 为 `20260912_02`。该 revision：
+
+- 给 `api_credential` 增加 `hash_version`、`token_prefix`、`created_by`、`rotated_from_id`、`expires_at`、`revoked_at`；
+- 将既有凭证标记为 `hash_version=sha256`，用于平滑迁移；新签发凭证使用 `hmac-sha256`；
+- 创建 `ai_usage_ledger`，按主体、模型、请求记录字符数、token、估算成本、成功/拒绝和错误原因；
+- 增加凭证到期/吊销/轮换和 AI 用量查询所需索引。
+
+旧 SHA-256 凭证不会在 migration 中失效，但应通过 `/credentials/{id}/rotate` 逐步轮换到 HMAC + pepper。`API_CREDENTIAL_PEPPER` 只保存在服务端配置中，不能写进数据库或客户端。
 
 ## SQLite
 
@@ -66,11 +75,9 @@ CI 使用 PostgreSQL 16 service 实际执行 fresh migration，并验证 `alembi
 
 ## 回滚边界
 
-`20260912_01` 是“接管基线”，不是传统从零开始的历史 revision。执行 downgrade 时：
+`20260912_01` 是“接管基线”，不是传统从零开始的历史 revision。生产环境 schema 回退仍应以备份恢复为主。
 
-- 只移除 V1.2.2 新增的 `feishu_callback.status_code`；
-- 不删除接管前已经存在的业务表；
-- 生产环境 schema 回退应以备份恢复为主，不依赖 destructive downgrade。
+`20260912_02` 的 downgrade 会删除 `ai_usage_ledger` 和新增的凭证生命周期字段，因此会丢失 V1.2.2 hardening 之后生成的用量审计、到期/吊销/轮换元数据。生产环境不应在没有备份和明确数据处置方案时执行该 downgrade。
 
 ## 后续规则
 
