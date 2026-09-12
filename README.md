@@ -1,10 +1,10 @@
-# JIJIN — AI 场外基金公司 V1.2.1
+# JIJIN — AI 场外基金公司 V1.2.2
 
 个人研究与真实前瞻模拟盘系统：Kimi 做研究、Qwen 做结构化、DeepSeek 做 CIO 推理、Python 做账本/风控/费用/截止时间/对账，飞书作为主要交互入口。
 
-> V1.2.1 **仅支持 SimulationBroker 模拟执行**，不连接任何真钱账户、不包含基金销售平台真实下单接口；不构成投资建议，不承诺收益。`LIVE_TRADING_ENABLED=true` 会被启动校验直接拒绝。
+> V1.2.2 **仅支持 SimulationBroker 模拟执行**，不连接任何真钱账户、不包含基金销售平台真实下单接口；不构成投资建议，不承诺收益。`LIVE_TRADING_ENABLED=true` 会被启动校验直接拒绝。
 
-## V1.2.1 已接通
+## V1.2.2 已接通
 
 - 订单状态机、条件更新版本控制、幂等键与旧卡失效
 - 场外基金逐基金截止时间；内部按 UTC 保存语义，飞书展示按配置时区转换
@@ -21,7 +21,7 @@
 
 ## 明确未支持
 
-- **CONVERT 基金转换：V1.2.1 直接拒绝创建**，避免未完成双腿结算时冻结份额；计划在后续版本单独实现。
+- **CONVERT 基金转换：V1.2.2 直接拒绝创建**，避免未完成双腿结算时冻结份额；计划在后续版本单独实现。
 - 自动实盘交易。
 - 08:45 盘前简报、13:30 提醒、14:00 决策卡、20:30 月末任务目前仍只有调度入口；其中赎回在途现金结算已接入真实业务逻辑，其余业务编排继续迭代。
 - 完整 Docker 加固等工程化工作仍后置。
@@ -35,7 +35,7 @@
 
 ## 数据库迁移
 
-数据库 schema 从 V1.2.2 hardening 开始由 Alembic 管理。无论 SQLite 开发环境还是 PostgreSQL 目标环境，启动应用前都必须先执行：
+数据库 schema 从 V1.2.2 开始由 Alembic 管理。无论 SQLite 开发环境还是 PostgreSQL 目标环境，启动应用前都必须先执行：
 
 ```bash
 alembic upgrade head
@@ -49,6 +49,8 @@ alembic upgrade head
 - 以后所有 schema 变化必须新增 Alembic revision，不能再依赖应用启动时 `Base.metadata.create_all()` 升级数据库。
 
 生产数据库执行 migration 前仍应先做可恢复备份。首个接管 revision 的 downgrade 只撤销 V1.2.2 新增列，不删除接管前已经存在的业务表。
+
+详细迁移 runbook：`docs/DB_MIGRATIONS_V1.2.2.md`。
 
 ## 快速开始
 
