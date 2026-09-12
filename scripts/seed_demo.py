@@ -3,13 +3,13 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
-from app.db import SessionLocal, init_db
+from app.db import SessionLocal, verify_schema_current
 from app.enums import AccountType, Role
 from app.models import Account, DisclaimerAcceptance, FeeRule, Fund, User, UserRiskProfile
 
 
 def main():
-    init_db()
+    verify_schema_current()
     with SessionLocal() as db:
         user = User(display_name="demo", role=Role.ADMIN, feishu_open_id="demo-open-id")
         db.add(user)
