@@ -32,16 +32,28 @@ class FeishuCallback(Base):
 
 
 class ApiCredential(Base):
-    """One-way-hashed credential bound to exactly one active application user."""
+    """One-way credential bound to exactly one active application user.
+
+    New credentials use HMAC-SHA256 with the server-side credential pepper. Legacy
+    V1.2.1 credentials remain readable as ``sha256`` until explicitly rotated.
+    """
 
     __tablename__ = "api_credential"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     user_id: Mapped[str] = mapped_column(ForeignKey("user.id"), index=True, nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    hash_version: Mapped[str] = mapped_column(String(32), default="sha256", nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(16), default="", nullable=False)
     label: Mapped[str] = mapped_column(String(100), default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(36))
+    rotated_from_id: Mapped[str | None] = mapped_column(
+        ForeignKey("api_credential.id"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
