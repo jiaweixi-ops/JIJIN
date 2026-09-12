@@ -14,7 +14,7 @@ python -m compileall -q app tests scripts alembic
 pytest
 ```
 
-Ruff 当前基线覆盖 correctness/import/bugbear：`E4/E7/E9/F/I/B`。FastAPI 的 `Depends/Header/Query/Body` 声明式调用列入 bugbear immutable-call 白名单。`UP/DTZ/FURB` 等现代化规则后续分批启用，避免一次性格式化或语义噪声掩盖真实缺陷。
+Ruff 当前基线覆盖 correctness + bugbear：`E4/E7/E9/F/B`，并暂时忽略 FastAPI 声明式默认参数常见的 `B008`。`I/UP/DTZ/FURB` 等导入排序/现代化规则后续分批启用，避免一次性格式化或机械升级掩盖真实缺陷。
 
 CI 同时验证 SQLite/PostgreSQL Alembic migration，以及 Docker 镜像的非 root 用户和 HEALTHCHECK。
 
