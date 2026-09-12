@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import feishu, health, orders, portfolio, reconciliation
+from app.api import decisions, feishu, health, orders, portfolio, reconciliation
 from app.config import get_settings
 from app.db import init_db
 
@@ -47,4 +47,5 @@ app.include_router(health.router)
 app.include_router(orders.router)
 app.include_router(portfolio.router)
 app.include_router(reconciliation.router)
+app.include_router(decisions.router)
 app.include_router(feishu.router)
