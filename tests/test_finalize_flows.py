@@ -86,6 +86,7 @@ def test_reconciliation_finish_derives_status_from_unresolved_diffs(db):
     clean_run = svc.finish(clean_run)
     assert clean_run.status == ReconciliationStatus.MATCHED
     assert clean_run.summary["all_ok"] is True
+    assert clean_run.summary["had_diffs"] is False
     assert clean_run.summary["derived_from_diffs"] is True
 
     diff_run = svc.create_run(account.id, date(2026, 1, 6), "diff")
@@ -100,6 +101,7 @@ def test_reconciliation_finish_derives_status_from_unresolved_diffs(db):
     diff_run = svc.finish(diff_run)
     assert diff_run.status == ReconciliationStatus.BLOCKING
     assert diff_run.summary["all_ok"] is False
+    assert diff_run.summary["had_diffs"] is True
 
 
 def test_resolving_last_blocking_diff_unblocks_reconciliation(db):
@@ -126,9 +128,13 @@ def test_resolving_last_blocking_diff_unblocks_reconciliation(db):
     )
     assert diff is not None
     assert run.status == ReconciliationStatus.BLOCKING
+    assert run.summary["all_ok"] is False
 
     run = svc.resolve_diff(diff.id, resolved_by=user.id, note="manual verification")
     assert run.status == ReconciliationStatus.RESOLVED
+    assert run.summary["all_ok"] is True
+    assert run.summary["had_diffs"] is True
+    assert run.summary["resolved"] is True
 
 
 def test_binding_trade_card_context_creates_active_feishu_session(db):
