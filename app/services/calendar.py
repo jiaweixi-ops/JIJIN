@@ -10,6 +10,13 @@ from app.models import TradingCalendar
 
 
 class TradingCalendarService:
+    """Trading-calendar helpers.
+
+    Domain/persistence convention: naive datetimes coming from the database are
+    interpreted as UTC. Local timezone conversion happens only at explicit
+    display/rule boundaries.
+    """
+
     def __init__(self, db: Session, timezone_name: str = "Asia/Shanghai"):
         self.db = db
         self.tz = ZoneInfo(timezone_name)
@@ -44,11 +51,12 @@ class TradingCalendarService:
         return datetime.now(timezone.utc)
 
     def to_local(self, value: datetime) -> datetime:
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(self.tz)
+        return self.to_utc(value).astimezone(self.tz)
 
-    def to_utc(self, value: datetime) -> datetime:
+    @staticmethod
+    def to_utc(value: datetime) -> datetime:
+        # SQLAlchemy/SQLite may round-trip aware UTC values as naive. In this
+        # project a naive persisted datetime always means UTC, never local time.
         if value.tzinfo is None:
-            value = value.replace(tzinfo=self.tz)
+            return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
