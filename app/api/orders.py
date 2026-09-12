@@ -3,16 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
 from app.domain.order_state import InvalidTransition, StaleOrderVersion
-from app.enums import DataQualityLevel, OrderEventType, OrderStatus
-from app.models import Account, DataQuality, Order
+from app.enums import OrderEventType, OrderStatus
+from app.models import Account, Fund, Order
 from app.schemas import OrderCreate, OrderModify, OrderView
 from app.security import InternalPrincipal, require_internal_auth
+from app.services.data_quality import DataQualityGate
 from app.services.order_service import EmergencyConfirmationRequired, OrderService
 from app.services.risk_service import RiskService
 from app.services.simulation_broker import SimulationBroker, WaitingForNav
@@ -20,23 +20,13 @@ from app.services.simulation_broker import SimulationBroker, WaitingForNav
 router = APIRouter(prefix="/orders", tags=["orders"])
 
 
-def _server_data_quality(db: Session, order: Order) -> DataQualityLevel:
+def _server_data_quality(db: Session, order: Order):
     if not order.fund_id:
-        return DataQualityLevel.RED
-    rows = db.scalars(
-        select(DataQuality)
-        .where(DataQuality.entity_id == order.fund_id)
-        .order_by(DataQuality.observed_at.desc())
-        .limit(20)
-    ).all()
-    if not rows:
-        return DataQualityLevel.RED
-    levels = {row.level for row in rows}
-    if DataQualityLevel.RED in levels:
-        return DataQualityLevel.RED
-    if DataQualityLevel.YELLOW in levels:
-        return DataQualityLevel.YELLOW
-    return DataQualityLevel.GREEN
+        raise HTTPException(400, "order has no fund")
+    fund = db.get(Fund, order.fund_id)
+    if not fund:
+        raise HTTPException(400, "fund not found")
+    return DataQualityGate(get_settings()).evaluate_fund(db, fund)
 
 
 @router.post("", response_model=OrderView)
@@ -93,7 +83,7 @@ def risk_order(
     account = db.get(Account, order.account_id)
     if not account:
         raise HTTPException(400, "account not found")
-    data_quality = _server_data_quality(db, order)
+    quality = _server_data_quality(db, order)
 
     try:
         if order.status in {
@@ -109,7 +99,7 @@ def risk_order(
         result = RiskService(db, get_settings()).check(
             order,
             account.user_id,
-            data_quality,
+            quality.research_quality,
         )
         order.risk_snapshot = {
             "passed": result.passed,
@@ -118,7 +108,9 @@ def risk_order(
             "requires_emergency_confirmation": result.requires_emergency_confirmation,
             "lot_allocation": result.lot_allocation,
             "penalty_fee_snapshot": result.penalty_fee_snapshot,
-            "data_quality": data_quality.value,
+            "research_quality": quality.research_quality.value,
+            "settlement_eligibility": quality.settlement_eligibility,
+            "quality_reasons": quality.reasons,
             "checked_at": datetime.now(timezone.utc).isoformat(),
         }
         svc.apply_event(
