@@ -5,12 +5,14 @@ import hmac
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.enums import OrderSide, Role
 from app.models import Fund, Order
 
@@ -92,12 +94,27 @@ class FeishuClient:
             response.raise_for_status()
 
 
+def _as_utc(value: datetime) -> datetime:
+    # Persisted datetimes may round-trip through SQLite as naive UTC.
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _format_local_time(value: datetime | None, timezone_name: str) -> str:
+    if value is None:
+        return "-"
+    return _as_utc(value).astimezone(ZoneInfo(timezone_name)).strftime("%H:%M")
+
+
 def trade_card(
     order: Order,
     fund: Fund,
     risk_status: str = "待风控",
     data_timestamp: str = "-",
+    timezone_name: str | None = None,
 ) -> dict[str, Any]:
+    timezone_name = timezone_name or get_settings().timezone
     if order.side == OrderSide.BUY:
         color, label, font = "red", "🔴 买入", "red"
     elif order.side == OrderSide.SELL:
@@ -110,8 +127,8 @@ def trade_card(
         if order.shares is not None
         else "预计份额待净值确认"
     )
-    cutoff = order.cutoff_at.strftime("%H:%M") if order.cutoff_at else "-"
-    expiry = order.expires_at.strftime("%H:%M") if order.expires_at else "-"
+    cutoff = _format_local_time(order.cutoff_at, timezone_name)
+    expiry = _format_local_time(order.expires_at, timezone_name)
     content = (
         f"<font color='{font}'>**{label}｜{fund.code} {fund.name}**</font>\n"
         f"板块：{fund.board}　份额类别：{fund.share_class}\n"
