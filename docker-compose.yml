@@ -1,26 +1,59 @@
 services:
+  migrate:
+    build: .
+    env_file: .env
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL to the internal PostgreSQL URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   api:
     build: .
     env_file: .env
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${JIJIN_API_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgresql+psycopg://jijin:jijin@postgres:5432/jijin
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL to the internal PostgreSQL URL}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: jijin
-      POSTGRES_USER: jijin
-      POSTGRES_PASSWORD: jijin
+      POSTGRES_DB: ${POSTGRES_DB:-jijin}
+      POSTGRES_USER: ${POSTGRES_USER:-jijin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a strong POSTGRES_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U jijin -d jijin"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-jijin} -d ${POSTGRES_DB:-jijin}",
+        ]
       interval: 5s
       timeout: 3s
       retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
 volumes:
   pgdata:
