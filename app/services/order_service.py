@@ -10,8 +10,12 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.domain.order_state import StaleOrderVersion, transition
 from app.enums import OrderEventType, OrderSide, OrderStatus
-from app.models import Fund, Order, OrderEvent, OrderVersion
+from app.models import AuditLog, Fund, Order, OrderEvent, OrderVersion
 from app.schemas import OrderCreate, OrderModify
+
+
+class EmergencyConfirmationRequired(ValueError):
+    pass
 
 
 class OrderService:
@@ -187,7 +191,11 @@ class OrderService:
                 f"订单版本已过期：当前 v{order.version}，请求 v{data.expected_version}。"
                 "请使用最新卡片。"
             )
-        if order.status not in {OrderStatus.PENDING_CONFIRM, OrderStatus.MODIFIED}:
+        if order.status not in {
+            OrderStatus.PENDING_CONFIRM,
+            OrderStatus.PENDING_EMERGENCY_CONFIRM,
+            OrderStatus.MODIFIED,
+        }:
             raise ValueError("当前订单状态不允许修改")
 
         self.apply_event(order, OrderEventType.USER_MODIFY, actor_id, snapshot=False)
@@ -210,6 +218,7 @@ class OrderService:
         expected_version: int,
         actor_id: str | None = None,
         now: datetime | None = None,
+        emergency_confirm: bool = False,
     ) -> Order:
         now_utc = self._now_utc(now)
         order = self.db.get(Order, order_id)
@@ -230,6 +239,71 @@ class OrderService:
             )
             self.db.commit()
             raise ValueError("订单已过期，请重新评估")
+
+        requires_emergency = bool(
+            (order.risk_snapshot or {}).get("requires_emergency_confirmation")
+        )
+        if requires_emergency:
+            if order.status == OrderStatus.PENDING_CONFIRM:
+                snapshot = dict(order.risk_snapshot or {})
+                snapshot["emergency_requested_by"] = actor_id
+                snapshot["emergency_requested_at"] = now_utc.isoformat()
+                order.risk_snapshot = snapshot
+                self.apply_event(
+                    order,
+                    OrderEventType.REQUEST_EMERGENCY_CONFIRM,
+                    actor_id,
+                    {"penalty_fee_snapshot": snapshot.get("penalty_fee_snapshot")},
+                )
+                self.db.add(
+                    AuditLog(
+                        actor_type="user" if actor_id else "system",
+                        actor_id=actor_id,
+                        action="emergency_exit.request",
+                        target_type="order",
+                        target_id=order.id,
+                        payload={
+                            "penalty_fee_snapshot": snapshot.get("penalty_fee_snapshot")
+                        },
+                    )
+                )
+                self.db.commit()
+                raise EmergencyConfirmationRequired(
+                    "紧急退出需要第二位确认人审批；请使用最新订单版本再次确认"
+                )
+
+            if order.status != OrderStatus.PENDING_EMERGENCY_CONFIRM:
+                raise ValueError("紧急退出订单状态不允许审批")
+            if not emergency_confirm:
+                raise EmergencyConfirmationRequired("需要显式 emergency_confirm=true")
+            if not actor_id:
+                raise ValueError("紧急退出审批必须记录审批人")
+            requested_by = (order.risk_snapshot or {}).get("emergency_requested_by")
+            if requested_by and requested_by == actor_id:
+                raise ValueError("紧急退出发起人与批准人不能是同一人")
+
+            order.emergency_approved_by = actor_id
+            self.db.add(
+                AuditLog(
+                    actor_type="user",
+                    actor_id=actor_id,
+                    action="emergency_exit.approve",
+                    target_type="order",
+                    target_id=order.id,
+                    payload={
+                        "requested_by": requested_by,
+                        "penalty_fee_snapshot": (order.risk_snapshot or {}).get(
+                            "penalty_fee_snapshot"
+                        ),
+                    },
+                )
+            )
+            self.apply_event(order, OrderEventType.EMERGENCY_APPROVE, actor_id)
+            self.db.commit()
+            return order
+
+        if order.status != OrderStatus.PENDING_CONFIRM:
+            raise ValueError("当前订单状态不允许普通审批")
         self.apply_event(order, OrderEventType.USER_APPROVE, actor_id)
         self.db.commit()
         return order
