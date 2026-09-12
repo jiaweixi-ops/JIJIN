@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.models import Reconciliation
 from app.security import InternalPrincipal, require_internal_auth
 from app.services.reconciliation import ReconciliationService
 
@@ -57,7 +58,7 @@ def compare_value(
     _: InternalPrincipal = Depends(require_internal_auth),
 ):
     svc = ReconciliationService(db)
-    run = db.get(__import__("app.models", fromlist=["Reconciliation"]).Reconciliation, run_id)
+    run = db.get(Reconciliation, run_id)
     if not run:
         raise HTTPException(404, "reconciliation run not found")
     ok = svc.compare_decimal(
@@ -79,8 +80,6 @@ def finish_run(
     db: Session = Depends(get_db),
     _: InternalPrincipal = Depends(require_internal_auth),
 ):
-    from app.models import Reconciliation
-
     run = db.get(Reconciliation, run_id)
     if not run:
         raise HTTPException(404, "reconciliation run not found")
