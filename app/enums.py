@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+from enum import StrEnum
+
+
+class Role(StrEnum):
+    READONLY = "readonly"
+    EDITOR = "editor"
+    CONFIRMER = "confirmer"
+    ADMIN = "admin"
+
+
+class OrderSide(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+    CONVERT = "CONVERT"
+    HOLD = "HOLD"
+    WAIT = "WAIT"
+
+
+class OrderStatus(StrEnum):
+    SUGGESTED = "SUGGESTED"
+    PENDING_RISK = "PENDING_RISK"
+    RISK_REJECTED = "RISK_REJECTED"
+    PENDING_CONFIRM = "PENDING_CONFIRM"
+    MODIFIED = "MODIFIED"
+    APPROVED = "APPROVED"
+    SUBMITTED = "SUBMITTED"
+    IN_TRANSIT = "IN_TRANSIT"
+    PARTIALLY_CONFIRMED = "PARTIALLY_CONFIRMED"
+    CONFIRMED = "CONFIRMED"
+    EXECUTION_FAILED = "EXECUTION_FAILED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+    MANUAL_RECONCILED = "MANUAL_RECONCILED"
+
+
+class OrderEventType(StrEnum):
+    SEND_TO_RISK = "SEND_TO_RISK"
+    RISK_PASS = "RISK_PASS"
+    RISK_REJECT = "RISK_REJECT"
+    USER_MODIFY = "USER_MODIFY"
+    USER_APPROVE = "USER_APPROVE"
+    SUBMIT_OK = "SUBMIT_OK"
+    SUBMIT_FAIL = "SUBMIT_FAIL"
+    MARK_IN_TRANSIT = "MARK_IN_TRANSIT"
+    PARTIAL_CONFIRM = "PARTIAL_CONFIRM"
+    FULL_CONFIRM = "FULL_CONFIRM"
+    EXPIRE = "EXPIRE"
+    CANCEL = "CANCEL"
+    MANUAL_FILL = "MANUAL_FILL"
+    DUPLICATE_CALLBACK = "DUPLICATE_CALLBACK"
+
+
+class DataQualityLevel(StrEnum):
+    GREEN = "GREEN"
+    YELLOW = "YELLOW"
+    RED = "RED"
+
+
+class CashStatus(StrEnum):
+    AVAILABLE = "AVAILABLE"
+    FROZEN = "FROZEN"
+    IN_TRANSIT = "IN_TRANSIT"
+    SETTLED = "SETTLED"
+
+
+class AccountType(StrEnum):
+    SIMULATION = "SIMULATION"
+    MANUAL = "MANUAL"
+
+
+class ReconciliationStatus(StrEnum):
+    PENDING = "PENDING"
+    MATCHED = "MATCHED"
+    DIFF = "DIFF"
+    BLOCKING = "BLOCKING"
+    RESOLVED = "RESOLVED"

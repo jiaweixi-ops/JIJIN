@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from app.api import feishu, health, orders, portfolio
+from app.db import init_db
+
+log = logging.getLogger(__name__)
+_scheduler = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _scheduler
+    init_db()
+    try:
+        from app.services.scheduler import build_scheduler
+        _scheduler = build_scheduler()
+        _scheduler.start()
+    except Exception as exc:
+        log.exception("scheduler unavailable: %s", exc)
+    yield
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+
+
+app = FastAPI(
+    title="AI 场外基金公司",
+    version="1.2.0",
+    description="个人研究 / 前瞻模拟盘。默认不接自动实盘，不构成投资建议。",
+    lifespan=lifespan,
+)
+app.include_router(health.router)
+app.include_router(orders.router)
+app.include_router(portfolio.router)
+app.include_router(feishu.router)

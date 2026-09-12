@@ -1,0 +1,26 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://jijin:jijin@postgres:5432/jijin
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: jijin
+      POSTGRES_USER: jijin
+      POSTGRES_PASSWORD: jijin
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jijin -d jijin"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  pgdata:
