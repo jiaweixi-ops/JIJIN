@@ -16,12 +16,28 @@
 - Kimi → Qwen → DeepSeek 的结构化 AI Gateway 已通过受认证 `/decisions/run` 接入
 - 飞书签名校验、防重放/回调幂等、交易卡片发送、会话绑定、自然语言修改及版本检查
 - 内部 API 使用服务凭证；人工审批必须使用绑定真实 `User` 的独立 `ApiCredential`，请求头不能自由伪造 actor
+- `ApiCredential` 已有完整生命周期：按用户签发、HMAC-SHA256 + server pepper、到期、吊销、轮换、`last_used_at` 和审计日志；旧 SHA-256 凭证仅作为迁移兼容，建议轮换
+- AI 配额按主体执行：源材料/单次请求/输出 token 上限、每日调用次数、每日估算成本上限；`AIUsageLedger` 与 `ModelCallLog.estimated_cost` 留痕，`GET /decisions/quota` 可查看当前额度
+- DataQualityGate 已接真实持久化数据源：`DataSource` 优先级/SLA、基金申赎与限购快照、费率版本、公告抓取、关键字段缺失和多源冲突；RED 会阻断研究交易候选
 - Alembic schema versioning；应用启动只校验数据库 revision，不再自动 `create_all`
 - Ruff 已进入 CI；SQLite / PostgreSQL migration 都有 CI 验证
 - Docker 以非 root 用户运行，带 `/ready` HEALTHCHECK；Compose 默认只绑定 `127.0.0.1`
 - Compose 不再内置弱口令，数据库和 API 都有 restart / 最小权限配置
 - HTTP 请求日志包含 request_id、route、status、duration；`/metrics/` 提供 Prometheus 基础指标
 - pytest 回归测试与 GitHub Actions
+
+## 关键管理入口
+
+- `POST /credentials`：签发用户凭证，明文 token 只返回一次
+- `POST /credentials/{id}/rotate`：轮换并立即吊销旧凭证
+- `POST /credentials/{id}/revoke`：人工吊销
+- `GET /credentials/users/{user_id}`：查看不含 token/hash 的凭证生命周期信息
+- `PUT /data-quality/sources/{name}`：注册/更新可信数据源优先级、SLA 和启停状态
+- `POST /data-quality/funds/{fund_id}/rules`：写入基金规则/公告观测快照
+- `GET /data-quality/funds/{fund_id}`：查看当前 research quality 与 settlement eligibility
+- `GET /decisions/quota`：查看当前认证主体的当日 AI 调用/成本配额
+
+以上管理入口都需要内部认证；凭证和数据源管理仅允许 system principal 或 ADMIN。
 
 ## 明确未支持
 
@@ -34,7 +50,22 @@
 - 领域逻辑使用 timezone-aware datetime；数据库读取到的 naive datetime 在本项目中统一解释为 **UTC**。
 - 截止时间/卡片展示转换为 `TIMEZONE`（默认 `Asia/Shanghai`）。
 - 未确认 NAV 可以作为研究估算，因此 `research_quality` 可能为 YELLOW；但正式模拟结算必须 `settlement_eligibility=true`，并且使用与该订单估值日匹配的 confirmed NAV。
+- 基金申赎/限购/费率/公告状态不再默认“已知”：必须来自已启用 `DataSource` 的持久化规则快照；超过该数据源 SLA、关键字段缺失、费率变化未确认或关键多源冲突都会进入 RED。
+- 多源冲突时低数字 `priority` 代表更高权威。低优先级冲突快照不会覆盖基金有效规则，但冲突本身仍会使质量 RED，直到权威数据重新确认。
 - 非交易日提交的模拟候选可解析到下一开放交易日估值；这不代表已经成交。
+
+## AI 配额与成本
+
+AI 预算由环境变量控制：
+
+- `AI_MAX_SOURCE_CHARS`
+- `AI_MAX_REQUEST_CHARS`
+- `AI_MAX_OUTPUT_TOKENS`
+- `AI_DAILY_MAX_CALLS_PER_SUBJECT`
+- `AI_DAILY_MAX_ESTIMATED_COST`
+- 三家模型各自的 input/output 每百万 token 价格
+
+价格单位由 `AI_COST_CURRENCY` 指定。价格保持 `0` 表示当前没有配置可靠价格，此时仍执行字符/token/call-count 配额，但成本估算为 0。配置成本上限时，Gateway 会在调用前按“输入字符最多按同等 token + 最大输出 token”进行保守预算，避免明知超预算仍发起模型请求。
 
 ## 数据库迁移
 
@@ -44,35 +75,25 @@
 alembic upgrade head
 ```
 
-首个 revision `20260912_01` 是迁移接管基线：
+迁移链：
 
-- **新数据库**：创建冻结的 V1.2.2 baseline schema。
-- **旧 V1.2.1 数据库**：保留已有表和数据，创建缺失的 baseline 表，并补 `feishu_callback.status_code`。
-- 应用启动时只检查 `alembic_version` 是否等于代码的 Alembic head；版本不匹配会 fail-fast，并提示先运行 `alembic upgrade head`。
-- 以后所有 schema 变化必须新增 Alembic revision，不能再依赖应用启动时 `Base.metadata.create_all()` 升级数据库。
+- `20260912_01`：接管 V1.2.1 / 建立 V1.2.2 baseline，并补 `feishu_callback.status_code`
+- `20260912_02`：增加 ApiCredential 生命周期字段和 `ai_usage_ledger`
 
-生产数据库执行 migration 前仍应先做可恢复备份。首个接管 revision 的 downgrade 只撤销 V1.2.2 新增列，不删除接管前已经存在的业务表。
+应用启动时检查 `alembic_version == code head`，版本不匹配会 fail-fast。以后所有 schema 变化必须新增 Alembic revision，不能依赖 `Base.metadata.create_all()` 升级生产数据库。
 
-详细迁移 runbook：`docs/DB_MIGRATIONS_V1.2.2.md`。
+生产数据库执行 migration 前应先做可恢复备份。详细迁移 runbook：`docs/DB_MIGRATIONS_V1.2.2.md`。
 
 ## Docker Compose
 
-容器运行建议使用单独模板：
-
 ```bash
 cp .env.compose.example .env
-# 填写 INTERNAL_API_TOKEN / POSTGRES_PASSWORD / DATABASE_URL
+# 填写 INTERNAL_API_TOKEN / API_CREDENTIAL_PEPPER / POSTGRES_PASSWORD / DATABASE_URL
 
 docker compose up --build -d
 ```
 
-Compose 会先等待 PostgreSQL healthy，再运行一次 `alembic upgrade head`，migration 成功后才启动 API。API 默认仅绑定：
-
-```text
-127.0.0.1:8000
-```
-
-不要为了远程访问直接改成公网 `0.0.0.0:8000`；应放在受控反向代理、VPN 或 TLS 网关之后。
+Compose 会先等待 PostgreSQL healthy，再运行一次 `alembic upgrade head`，migration 成功后才启动 API。API 默认仅绑定 `127.0.0.1:8000`。远程访问应放在受控反向代理、VPN 或 TLS 网关之后。
 
 健康与监控：
 
@@ -98,6 +119,6 @@ ruff check .
 pytest
 ```
 
-生产/准生产环境必须配置 `INTERNAL_API_TOKEN`；若启用飞书，还必须完整配置飞书验签参数。人工审批应使用按用户签发、数据库仅保存哈希的 `ApiCredential`，不要共享一个人工审批令牌。
+生产/准生产环境必须配置 `INTERNAL_API_TOKEN`。若需要签发人工凭证，还必须配置独立的强随机 `API_CREDENTIAL_PEPPER`；该 pepper 不下发给客户端。若启用飞书，还必须完整配置飞书验签参数。
 
 详细开发基线见 `docs/ARCHITECTURE_V1.2.md`。
