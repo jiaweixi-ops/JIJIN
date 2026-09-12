@@ -76,14 +76,13 @@ def compare_value(
 @router.post("/runs/{run_id}/finish")
 def finish_run(
     run_id: str,
-    all_ok: bool,
     db: Session = Depends(get_db),
     _: InternalPrincipal = Depends(require_internal_auth),
 ):
     run = db.get(Reconciliation, run_id)
     if not run:
         raise HTTPException(404, "reconciliation run not found")
-    run = ReconciliationService(db).finish(run, all_ok)
+    run = ReconciliationService(db).finish(run)
     return {"id": run.id, "status": run.status.value, "summary": run.summary}
 
 
