@@ -57,6 +57,7 @@ class Settings(BaseSettings):
 
     default_cutoff_buffer_minutes: int = 10
     order_stale_minutes: int = 60
+    operational_run_stale_minutes: int = 30
     risk_profile_valid_days: int = 365
     nav_red_after_hours: int = 72
     nav_yellow_after_hours: int = 36
@@ -75,7 +76,8 @@ class Settings(BaseSettings):
             raise RuntimeError(f"unsupported LOG_LEVEL={self.log_level!r}")
         if self.live_trading_enabled:
             raise RuntimeError(
-                "V1.2.2 does not implement live trading; LIVE_TRADING_ENABLED must be false"
+                "V1.3 operational simulation does not implement live trading; "
+                "LIVE_TRADING_ENABLED must be false"
             )
         if env in {"prod", "staging"}:
             if not self.internal_api_token:
@@ -100,6 +102,8 @@ class Settings(BaseSettings):
             raise RuntimeError("AI_DAILY_MAX_ESTIMATED_COST must be >= 0")
         if self.data_source_conflict_window_minutes < 0:
             raise RuntimeError("DATA_SOURCE_CONFLICT_WINDOW_MINUTES must be >= 0")
+        if self.operational_run_stale_minutes < 1:
+            raise RuntimeError("OPERATIONAL_RUN_STALE_MINUTES must be >= 1")
         if self.feishu_enabled:
             missing = [
                 name
