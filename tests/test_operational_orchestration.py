@@ -144,7 +144,8 @@ def test_operational_run_is_idempotent_on_closed_day(db):
 
 def test_decision_window_risks_candidate_and_stops_at_human_confirmation(db):
     settings = _settings()
-    observed_at = datetime(2026, 9, 14, 5, 30, tzinfo=timezone.utc)  # 13:30 Shanghai
+    # Keep ingestion timestamps behind the real wall clock; 2026-09-11 is Friday.
+    observed_at = datetime(2026, 9, 11, 5, 30, tzinfo=timezone.utc)  # 13:30 Shanghai
     _, account, fund = _seed_tradeable_fund(db, settings, now=observed_at)
 
     order = OrderService(db, settings).create(
@@ -163,7 +164,7 @@ def test_decision_window_risks_candidate_and_stops_at_human_confirmation(db):
 
     run = OperationalOrchestrator(db, settings).run(
         "decision_window",
-        now=datetime(2026, 9, 14, 6, 0, tzinfo=timezone.utc),  # 14:00 Shanghai
+        now=datetime(2026, 9, 11, 6, 0, tzinfo=timezone.utc),  # 14:00 Shanghai
         trigger="manual",
     )
     db.refresh(order)
@@ -180,7 +181,7 @@ def test_decision_window_risks_candidate_and_stops_at_human_confirmation(db):
 
 def test_early_cutoff_job_processes_candidate_before_normal_decision_window(db):
     settings = _settings()
-    observed_at = datetime(2026, 9, 14, 5, 20, tzinfo=timezone.utc)  # 13:20 Shanghai
+    observed_at = datetime(2026, 9, 11, 5, 20, tzinfo=timezone.utc)  # 13:20 Shanghai
     _, account, fund = _seed_tradeable_fund(
         db,
         settings,
@@ -202,7 +203,7 @@ def test_early_cutoff_job_processes_candidate_before_normal_decision_window(db):
 
     run = OperationalOrchestrator(db, settings).run(
         "early_cutoff",
-        now=datetime(2026, 9, 14, 5, 30, tzinfo=timezone.utc),  # 13:30 Shanghai
+        now=datetime(2026, 9, 11, 5, 30, tzinfo=timezone.utc),  # 13:30 Shanghai
         trigger="manual",
     )
     db.refresh(order)
