@@ -160,6 +160,11 @@ def test_decision_window_risks_candidate_and_stops_at_human_confirmation(db):
         ),
         now=observed_at,
     )
+    order.data_snapshot = {
+        "valuation_date": "2026-09-11",
+        "frozen_marker": "keep",
+    }
+    db.commit()
     assert order.status == OrderStatus.SUGGESTED
 
     run = OperationalOrchestrator(db, settings).run(
@@ -175,6 +180,8 @@ def test_decision_window_risks_candidate_and_stops_at_human_confirmation(db):
     assert order.status == OrderStatus.PENDING_CONFIRM
     assert order.risk_snapshot["passed"] is True
     assert order.risk_snapshot["source"] == "operational_orchestrator"
+    assert order.data_snapshot["valuation_date"] == "2026-09-11"
+    assert order.data_snapshot["frozen_marker"] == "keep"
     # V1.3 orchestration must never auto-approve or auto-submit.
     assert order.status not in {OrderStatus.APPROVED, OrderStatus.SUBMITTED}
 
