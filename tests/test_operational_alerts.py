@@ -124,7 +124,7 @@ def test_alert_serialization_and_card_use_explicit_utc(db):
     assert _api_utc(alert.last_seen_at).utcoffset() is not None
     card = operational_alert_card(alert)
     assert card["header"]["template"] == "yellow"
-    assert "组合达到回撤保护阈值" in card["header"]["title"]["content"]
+    assert "组合达到回撤保护阈值" in card["elements"][0]["content"]
 
 
 def test_alert_ack_requires_human_admin():
