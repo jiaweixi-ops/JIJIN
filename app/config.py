@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     research_processing_stale_minutes: int = 30
     research_pipeline_batch_size: int = 5
     research_pipeline_max_attempts: int = 5
+
+    # V1.3 Phase 3: explicit, allowlisted external research collection.
+    research_collection_timeout_seconds: float = 15.0
+    research_collection_max_bytes: int = 2_000_000
+    research_collection_max_redirects: int = 3
+    research_collection_max_items_per_source: int = 20
+    research_collection_batch_size: int = 20
+    research_collection_allow_http: bool = False
+
     risk_profile_valid_days: int = 365
     nav_red_after_hours: int = 72
     nav_yellow_after_hours: int = 36
@@ -113,6 +122,16 @@ class Settings(BaseSettings):
             raise RuntimeError("RESEARCH_PIPELINE_BATCH_SIZE must be >= 1")
         if self.research_pipeline_max_attempts < 1:
             raise RuntimeError("RESEARCH_PIPELINE_MAX_ATTEMPTS must be >= 1")
+        if self.research_collection_timeout_seconds <= 0:
+            raise RuntimeError("RESEARCH_COLLECTION_TIMEOUT_SECONDS must be > 0")
+        if self.research_collection_max_bytes < 1024:
+            raise RuntimeError("RESEARCH_COLLECTION_MAX_BYTES must be >= 1024")
+        if self.research_collection_max_redirects < 0:
+            raise RuntimeError("RESEARCH_COLLECTION_MAX_REDIRECTS must be >= 0")
+        if self.research_collection_max_items_per_source < 1:
+            raise RuntimeError("RESEARCH_COLLECTION_MAX_ITEMS_PER_SOURCE must be >= 1")
+        if self.research_collection_batch_size < 1:
+            raise RuntimeError("RESEARCH_COLLECTION_BATCH_SIZE must be >= 1")
         if self.feishu_enabled:
             missing = [
                 name

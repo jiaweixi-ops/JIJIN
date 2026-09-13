@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, inspect, text
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAD = "20260913_02"
+HEAD = "20260913_03"
 
 
 def _config(database_url: str) -> Config:
@@ -33,6 +33,9 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
     assert "operational_run" in inspector.get_table_names()
     assert "research_inbox" in inspector.get_table_names()
     assert "research_evidence" in inspector.get_table_names()
+    assert "research_collection_source" in inspector.get_table_names()
+    assert "research_collection_run" in inspector.get_table_names()
+    assert "research_collected_document" in inspector.get_table_names()
     callback_columns = {column["name"] for column in inspector.get_columns("feishu_callback")}
     assert "status_code" in callback_columns
     credential_columns = {column["name"] for column in inspector.get_columns("api_credential")}
@@ -52,6 +55,14 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
     } <= research_columns
     evidence_columns = {column["name"] for column in inspector.get_columns("research_evidence")}
     assert {"research_item_id", "evidence_id", "source_url", "confidence"} <= evidence_columns
+    collection_columns = {
+        column["name"] for column in inspector.get_columns("research_collection_source")
+    }
+    assert {"account_id", "fund_id", "adapter", "feed_url", "etag", "last_error"} <= collection_columns
+    document_columns = {
+        column["name"] for column in inspector.get_columns("research_collected_document")
+    }
+    assert {"source_id", "research_item_id", "fingerprint", "content_sha256", "content"} <= document_columns
     with engine.connect() as connection:
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == HEAD
 
@@ -91,6 +102,9 @@ def test_alembic_adopts_legacy_schema_and_backfills_callback_status(tmp_path):
     assert "operational_run" in inspector.get_table_names()
     assert "research_inbox" in inspector.get_table_names()
     assert "research_evidence" in inspector.get_table_names()
+    assert "research_collection_source" in inspector.get_table_names()
+    assert "research_collection_run" in inspector.get_table_names()
+    assert "research_collected_document" in inspector.get_table_names()
     with engine.connect() as connection:
         status_code = connection.execute(
             text("SELECT status_code FROM feishu_callback WHERE event_id='legacy-event'")

@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import (  # noqa: F401
+    collection_models,
     hardening_models,
     models,
     operational_models,
