@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, inspect, text
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAD = "20260913_05"
+HEAD = "20260913_06"
 
 
 def _config(database_url: str) -> Config:
@@ -34,6 +34,9 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
         "ai_usage_ledger",
         "operational_run",
         "operational_alert",
+        "fund_data_connector",
+        "fund_data_sync_run",
+        "fund_data_observation",
         "research_inbox",
         "research_evidence",
         "research_collection_source",
@@ -58,6 +61,16 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
         "acknowledged_by",
         "resolved_at",
     } <= alert_columns
+    fund_data_columns = {column["name"] for column in inspector.get_columns("fund_data_connector")}
+    assert {
+        "source_name",
+        "adapter",
+        "endpoint_url",
+        "auth_env_key",
+        "etag",
+        "last_success_at",
+        "last_error",
+    } <= fund_data_columns
     research_columns = {column["name"] for column in inspector.get_columns("research_inbox")}
     assert {
         "account_id",
@@ -137,6 +150,9 @@ def test_alembic_adopts_legacy_schema_and_backfills_callback_status(tmp_path):
         "ai_usage_ledger",
         "operational_run",
         "operational_alert",
+        "fund_data_connector",
+        "fund_data_sync_run",
+        "fund_data_observation",
         "research_inbox",
         "research_evidence",
         "research_collection_source",
