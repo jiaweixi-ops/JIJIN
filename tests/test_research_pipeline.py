@@ -13,7 +13,7 @@ from app.config import Settings
 from app.db import get_db
 from app.enums import AccountType, DataQualityLevel, OrderSide, OrderStatus, Role
 from app.models import Account, DataQuality, DataSource, Fund, NavConfirm, Order, User
-from app.research_models import ResearchEvidence, ResearchInboxItem
+from app.research_models import ResearchEvidence
 from app.research_schemas import ResearchInboxCreate, ResearchMaterialIn
 from app.services.research_pipeline import ResearchIdempotencyConflict, ResearchPipelineService
 
