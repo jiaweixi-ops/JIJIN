@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.enums import OrderSide, OrderStatus
-from app.models import Account, Fund, HoldingLot, NavConfirm, Order, TradeFill
+from app.models import Account, HoldingLot, NavConfirm, Order, TradeFill
 from app.snapshot_models import PortfolioSnapshot
 
 ZERO = Decimal("0")
@@ -185,8 +185,6 @@ class PortfolioRiskService:
                 use = min(capacity, remaining)
                 remaining_by_lot[lot.id] = capacity - use
                 remaining -= use
-            # If a previously risk-passed order now over-reserves the ledger,
-            # every remaining share stays unavailable to a new candidate.
             if remaining > ZERO:
                 for lot in lots:
                     remaining_by_lot[lot.id] = ZERO
