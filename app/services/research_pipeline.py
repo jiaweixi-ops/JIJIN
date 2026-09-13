@@ -19,6 +19,7 @@ from app.services.ai_gateway import ModelGateway
 from app.services.data_quality import DataQualityGate
 from app.services.decision_engine import DecisionEngine
 from app.services.order_service import OrderService
+from app.services.research_metrics import ResearchMetricsService
 
 PIPELINE_VERSION = "v1.3-phase2"
 TERMINAL_RESEARCH_STATUSES = {"PROCESSED"}
@@ -44,6 +45,7 @@ class ResearchPipelineService:
         self.settings = settings
         self.quality_gate = DataQualityGate(settings)
         self.order_service = OrderService(db, settings)
+        self.metrics_service = ResearchMetricsService(db)
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:
@@ -147,7 +149,7 @@ class ResearchPipelineService:
             attempt=0,
             created_by=actor_id,
             materials=self._material_rows(payload),
-            python_metrics=payload.python_metrics,
+            python_metrics={},
             quality_snapshot={},
             research_packet={},
             structured_packet={},
@@ -501,6 +503,7 @@ class ResearchPipelineService:
             if account.account_type != AccountType.SIMULATION or not account.enabled:
                 raise ValueError("research target account is not an enabled simulation account")
 
+            item.python_metrics = self.metrics_service.snapshot(fund, account)
             quality, quality_snapshot = self._quality_snapshot(fund, now_utc)
             item.quality_snapshot = quality_snapshot
             item.updated_at = now_utc
@@ -524,7 +527,7 @@ class ResearchPipelineService:
                 )
                 plan = engine.decide(
                     blocked_research,
-                    item.python_metrics or {},
+                    item.python_metrics,
                     DataQualityLevel.RED,
                 )
                 item.decision_plan = plan.model_dump(mode="json")
@@ -571,7 +574,7 @@ class ResearchPipelineService:
             else:
                 plan = engine.decide(
                     structured,
-                    item.python_metrics or {},
+                    item.python_metrics,
                     quality.research_quality,
                 )
                 item.decision_plan = plan.model_dump(mode="json")
