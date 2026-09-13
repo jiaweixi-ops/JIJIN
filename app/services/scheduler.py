@@ -8,8 +8,11 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.enums import AccountType
 from app.models import Account
+from app.operational_models import OperationalAlert
 from app.services.calendar import TradingCalendarService
+from app.services.feishu import FeishuClient
 from app.services.ledger import MissingConfirmedNav
+from app.services.operational_alerts import OperationalAlertService, operational_alert_card
 from app.services.operational_orchestrator import OperationalOrchestrator
 from app.services.order_service import OrderService
 from app.services.reporting import ReportService
@@ -160,6 +163,40 @@ def _settle_due_cash() -> None:
             log.exception("due-cash settlement job failed")
 
 
+def _operational_alerts() -> None:
+    settings = get_settings()
+    with SessionLocal() as db:
+        try:
+            service = OperationalAlertService(db, settings)
+            summary = service.sweep()
+            delivered = 0
+            failed = 0
+            if settings.feishu_webhook_url:
+                client = FeishuClient(settings)
+                for alert_id in summary["pending_notification_ids"]:
+                    alert = db.get(OperationalAlert, alert_id)
+                    if alert is None or alert.state != "OPEN" or alert.notified_at is not None:
+                        continue
+                    try:
+                        client.send_webhook(operational_alert_card(alert))
+                        service.mark_notified(alert.id)
+                        delivered += 1
+                    except Exception:
+                        failed += 1
+                        db.rollback()
+                        log.exception(
+                            "operational alert delivery failed alert_id=%s type=%s",
+                            alert.id,
+                            alert.alert_type,
+                        )
+            summary = {**summary, "delivered": delivered, "delivery_failed": failed}
+            logger = log.warning if failed or summary["opened"] or summary["reopened"] else log.info
+            logger("operational alert sweep finished summary=%s", summary)
+        except Exception:
+            db.rollback()
+            log.exception("operational alert scheduler wrapper failed")
+
+
 def build_scheduler():
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
@@ -237,6 +274,18 @@ def build_scheduler():
         _settle_due_cash,
         CronTrigger(day_of_week="mon-fri", hour="8-22", minute="*/15"),
         id="settle_due_cash",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+    # Alert detection also runs on weekends so infrastructure/accounting defects
+    # do not stay hidden until the next trading day. Trading-day-specific signals
+    # (for example formal snapshot pending) still check the business calendar.
+    scheduler.add_job(
+        _operational_alerts,
+        CronTrigger(day_of_week="mon-sun", hour="8-23", minute="0,30"),
+        id="operational_alerts",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
