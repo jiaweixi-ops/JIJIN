@@ -396,6 +396,7 @@ class OperationalOrchestrator:
                     now=now_utc,
                 )
                 order.data_snapshot = {
+                    **(order.data_snapshot or {}),
                     "research_quality": quality.research_quality.value,
                     "settlement_eligibility": quality.settlement_eligibility,
                     "quality_reasons": quality.reasons,
