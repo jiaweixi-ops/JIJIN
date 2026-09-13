@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,6 +16,14 @@ from app.services.operational_orchestrator import OperationalOrchestrator, SUPPO
 router = APIRouter(prefix="/operations", tags=["operations"])
 
 
+def _api_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _serialize(run: OperationalRun) -> dict:
     return {
         "id": run.id,
@@ -22,9 +32,9 @@ def _serialize(run: OperationalRun) -> dict:
         "trigger": run.trigger,
         "status": run.status,
         "attempt": run.attempt,
-        "scheduled_for": run.scheduled_for,
-        "started_at": run.started_at,
-        "finished_at": run.finished_at,
+        "scheduled_for": _api_utc(run.scheduled_for),
+        "started_at": _api_utc(run.started_at),
+        "finished_at": _api_utc(run.finished_at),
         "summary": run.summary or {},
         "error": run.error,
     }
