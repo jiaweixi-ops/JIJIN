@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -11,10 +10,8 @@ from app.config import Settings
 from app.enums import DataQualityLevel
 from app.fund_data_models import FundDataObservation
 from app.models import DataQuality, DataSource, Fund, NavConfirm
-from app.services.fund_data_sync import (
-    FundDataHTTPResult,
-    FundDataSyncService,
-)
+from app.services.data_quality import DataQualityGate
+from app.services.fund_data_sync import FundDataHTTPResult, FundDataSyncService
 
 OBSERVED = "2026-09-12T10:00:00Z"
 
@@ -44,9 +41,15 @@ def _source(db, name: str = "official", priority: int = 10):
     return source
 
 
-def _payload(*, nav_status: str = "CONFIRMED", nav_value: str = "1.2345", nav_date: str = "2026-09-12"):
+def _payload(
+    *,
+    nav_status: str = "CONFIRMED",
+    nav_value: str = "1.2345",
+    nav_date: str = "2026-09-12",
+    observed_at: str = OBSERVED,
+):
     return {
-        "observed_at": OBSERVED,
+        "observed_at": observed_at,
         "funds": [
             {
                 "code": "000001",
@@ -70,7 +73,7 @@ def _payload(*, nav_status: str = "CONFIRMED", nav_value: str = "1.2345", nav_da
                     "nav_date": nav_date,
                     "value": nav_value,
                     "status": nav_status,
-                    "observed_at": OBSERVED,
+                    "observed_at": observed_at,
                 },
                 "metadata": {"manager": "测试经理"},
             }
@@ -111,12 +114,28 @@ def test_sync_registered_connector_ingests_rules_profile_and_confirmed_nav(db):
     observation = db.scalar(select(FundDataObservation))
     assert observation is not None and observation.accepted is True
 
-    # The same exact provider row is audit-idempotent and does not re-ingest.
     second = service.sync_connector(connector.id)
     assert second.status == "SUCCEEDED"
     assert second.ingested_count == 0
     assert second.summary["duplicates"] == 1
     assert len(list(db.scalars(select(FundDataObservation)))) == 1
+
+
+def test_identical_values_with_new_observation_time_refresh_freshness(db):
+    _source(db)
+    settings = Settings(app_env="test")
+    service = FundDataSyncService(db, settings, fetcher=StaticFetcher(_payload()))
+    connector = service.create_connector(
+        name="freshness-json",
+        source_name="official",
+        endpoint_url="https://data.example/funds.json",
+    )
+    assert service.sync_connector(connector.id).ingested_count == 1
+
+    service.fetcher = StaticFetcher(_payload(observed_at="2026-09-12T11:00:00Z"))
+    second = service.sync_connector(connector.id)
+    assert second.ingested_count == 1
+    assert len(list(db.scalars(select(FundDataObservation)))) == 2
 
 
 def test_estimated_nav_is_quality_data_but_never_settlement_confirmation(db):
@@ -134,9 +153,7 @@ def test_estimated_nav_is_quality_data_but_never_settlement_confirmation(db):
     run = service.sync_connector(connector.id)
     assert run.status == "SUCCEEDED"
     assert db.scalar(select(NavConfirm)) is None
-    quality = db.scalar(
-        select(DataQuality).where(DataQuality.field_name == "nav_status")
-    )
+    quality = db.scalar(select(DataQuality).where(DataQuality.field_name == "nav_status"))
     assert quality is not None
     assert quality.level == DataQualityLevel.YELLOW
     assert quality.details["settlement_eligible"] is False
@@ -172,14 +189,24 @@ def test_lower_priority_conflicting_confirmed_nav_does_not_overwrite_official(db
     conflict = db.scalar(
         select(DataQuality)
         .where(DataQuality.field_name == "nav_conflict")
-        .order_by(DataQuality.observed_at.desc())
+        .order_by(DataQuality.observed_at.desc(), DataQuality.created_at.desc())
     )
     assert conflict is not None
     assert conflict.level == DataQualityLevel.RED
     assert conflict.details["effective"] is False
+    quality = DataQualityGate(settings).evaluate_fund(db, fund)
+    assert quality.research_quality == DataQualityLevel.RED
+    assert quality.settlement_eligibility is False
+
+    # A later authoritative confirmation of the same effective NAV clears the
+    # outstanding conflict without changing the confirmed settlement value.
+    official.fetcher = StaticFetcher(_payload(observed_at="2026-09-12T11:00:00Z"))
+    assert official.sync_connector(official_connector.id).status == "SUCCEEDED"
+    quality = DataQualityGate(settings).evaluate_fund(db, fund)
+    assert "已确认净值存在未清除的权威来源冲突" not in quality.reasons
 
 
-def test_future_nav_is_rejected_without_confirming_it(db):
+def test_future_nav_rejection_rolls_back_business_row_but_keeps_audit_observation(db):
     _source(db)
     service = FundDataSyncService(
         db,
@@ -195,6 +222,7 @@ def test_future_nav_is_rejected_without_confirming_it(db):
     assert run.status == "PARTIAL"
     assert run.rejected_count == 1
     assert db.scalar(select(NavConfirm)) is None
+    assert db.scalar(select(Fund).where(Fund.code == "000001")) is None
     observation = db.scalar(select(FundDataObservation))
     assert observation.accepted is False
     assert "future NAV" in observation.rejection_reason
