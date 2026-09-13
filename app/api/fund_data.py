@@ -11,6 +11,7 @@ from app.db import get_db
 from app.enums import Role
 from app.fund_data_models import FundDataConnector, FundDataObservation, FundDataSyncRun
 from app.fund_data_schemas import FundDataConnectorCreate, FundDataConnectorPatch
+from app.models import AuditLog
 from app.security import InternalPrincipal, require_internal_auth
 from app.services.fund_data_sync import FundDataSyncService
 from app.services.research_collection import _public_url_syntax
@@ -116,9 +117,12 @@ def patch_connector(
     settings = get_settings()
     changes = payload.model_dump(exclude_unset=True)
     if "endpoint_url" in changes:
-        changes["endpoint_url"] = _public_url_syntax(
-            changes["endpoint_url"], allow_http=settings.fund_data_allow_http
-        )
+        try:
+            changes["endpoint_url"] = _public_url_syntax(
+                changes["endpoint_url"], allow_http=settings.fund_data_allow_http
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         connector.etag = None
         connector.last_modified = None
     future_header = changes.get("auth_header_name", connector.auth_header_name)
@@ -128,6 +132,16 @@ def patch_connector(
     for key, value in changes.items():
         setattr(connector, key, value)
     connector.updated_at = datetime.now(timezone.utc)
+    db.add(
+        AuditLog(
+            actor_type="user" if principal.actor_id else "system",
+            actor_id=principal.actor_id,
+            action="fund_data.connector.patch",
+            target_type="fund_data_connector",
+            target_id=connector.id,
+            payload={"changed_fields": sorted(changes)},
+        )
+    )
     db.commit()
     return _connector_view(connector)
 
