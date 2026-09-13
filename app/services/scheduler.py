@@ -6,6 +6,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.services.operational_orchestrator import OperationalOrchestrator
 from app.services.order_service import OrderService
+from app.services.research_pipeline import ResearchPipelineService
 from app.services.simulation_broker import SimulationBroker
 
 log = logging.getLogger(__name__)
@@ -35,6 +36,18 @@ def _run_operational_job(job_name: str) -> None:
 
 def _morning_brief() -> None:
     _run_operational_job("morning_brief")
+
+
+def _research_pipeline() -> None:
+    settings = get_settings()
+    with SessionLocal() as db:
+        try:
+            summary = ResearchPipelineService(db, settings).process_pending()
+            logger = log.warning if summary["failed"] else log.info
+            logger("research pipeline batch finished summary=%s", summary)
+        except Exception:
+            db.rollback()
+            log.exception("research pipeline scheduler wrapper failed")
 
 
 def _early_cutoff() -> None:
@@ -81,6 +94,15 @@ def build_scheduler():
         _morning_brief,
         CronTrigger(day_of_week="mon-fri", hour=8, minute=45),
         id="morning_brief",
+        **common,
+    )
+    # Trusted inbox material is converted into auditable SUGGESTED candidates
+    # before the 13:30 early-cutoff and 14:00 normal risk windows. The research
+    # pipeline never approves or submits an order.
+    scheduler.add_job(
+        _research_pipeline,
+        CronTrigger(day_of_week="mon-fri", hour=13, minute=15),
+        id="research_pipeline",
         **common,
     )
     scheduler.add_job(
