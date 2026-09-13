@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import logging
 
+from sqlalchemy import select
+
 from app.config import get_settings
 from app.db import SessionLocal
+from app.enums import AccountType
+from app.models import Account
 from app.services.calendar import TradingCalendarService
+from app.services.ledger import MissingConfirmedNav
 from app.services.operational_orchestrator import OperationalOrchestrator
 from app.services.order_service import OrderService
+from app.services.reporting import ReportService
 from app.services.research_collection import ResearchCollectionService
 from app.services.research_dossier import ResearchDossierService
 from app.services.research_pipeline import ResearchPipelineService
@@ -61,8 +67,6 @@ def _research_dossiers() -> None:
             log.info("research dossier batch finished summary=%s", summary)
         except Exception:
             db.rollback()
-            # The AI pipeline excludes raw collected inbox items, so dossier failure
-            # fails closed instead of producing one candidate per article.
             log.exception("research dossier scheduler wrapper failed")
 
 
@@ -96,6 +100,52 @@ def _decision_window() -> None:
 
 def _month_end_probe() -> None:
     _run_operational_job("month_end_probe")
+
+
+def _portfolio_snapshot() -> None:
+    settings = get_settings()
+    with SessionLocal() as db:
+        try:
+            calendar = TradingCalendarService(db, settings.timezone)
+            business_date = calendar.local_now().date()
+            if not calendar.is_open(business_date, "CN"):
+                log.info(
+                    "portfolio snapshot skipped reason=CN_MARKET_CLOSED business_date=%s",
+                    business_date,
+                )
+                return
+            accounts = db.scalars(
+                select(Account).where(
+                    Account.enabled.is_(True),
+                    Account.account_type == AccountType.SIMULATION,
+                )
+            ).all()
+            reporter = ReportService(db)
+            recorded: list[str] = []
+            pending: list[dict[str, str]] = []
+            for account in accounts:
+                try:
+                    reporter.record_snapshot(account.id, business_date)
+                    recorded.append(account.id)
+                except MissingConfirmedNav as exc:
+                    db.rollback()
+                    pending.append(
+                        {
+                            "account_id": account.id,
+                            "fund_id": exc.fund_id,
+                            "nav_date": exc.nav_date.isoformat(),
+                        }
+                    )
+            logger = log.warning if pending else log.info
+            logger(
+                "portfolio snapshot batch finished business_date=%s recorded=%s pending=%s",
+                business_date,
+                recorded,
+                pending,
+            )
+        except Exception:
+            db.rollback()
+            log.exception("portfolio snapshot scheduler wrapper failed")
 
 
 def _settle_due_cash() -> None:
@@ -144,9 +194,6 @@ def build_scheduler():
         id="research_collection_predecision",
         **common,
     )
-    # Consolidate the morning + pre-decision feed documents into at most one
-    # account/fund dossier before models run. Raw collected inbox rows are never
-    # eligible for direct AI processing.
     scheduler.add_job(
         _research_dossiers,
         CronTrigger(day_of_week="mon-fri", hour=13, minute=0),
@@ -175,6 +222,14 @@ def build_scheduler():
         _month_end_probe,
         CronTrigger(day_of_week="mon-fri", hour=20, minute=30),
         id="month_end_probe",
+        **common,
+    )
+    # Exact confirmed NAV only. If any held fund is still pending (for example
+    # QDII/FOF), the account snapshot is skipped rather than fabricating P&L.
+    scheduler.add_job(
+        _portfolio_snapshot,
+        CronTrigger(day_of_week="mon-fri", hour=22, minute=30),
+        id="portfolio_snapshot",
         **common,
     )
 

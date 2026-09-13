@@ -140,6 +140,14 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "RESEARCH_DOSSIER_MAX_CHARS must be positive and <= AI_MAX_SOURCE_CHARS"
             )
+        if not 0 < self.max_single_fund_weight <= 1:
+            raise RuntimeError("MAX_SINGLE_FUND_WEIGHT must be in (0, 1]")
+        if not 0 < self.max_daily_trade_ratio <= 1:
+            raise RuntimeError("MAX_DAILY_TRADE_RATIO must be in (0, 1]")
+        if not 0 < self.max_portfolio_drawdown <= 1:
+            raise RuntimeError("MAX_PORTFOLIO_DRAWDOWN must be in (0, 1]")
+        if self.max_consecutive_loss_days < 1:
+            raise RuntimeError("MAX_CONSECUTIVE_LOSS_DAYS must be >= 1")
         if self.feishu_enabled:
             missing = [
                 name
