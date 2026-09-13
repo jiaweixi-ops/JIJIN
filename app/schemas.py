@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.enums import DataQualityLevel, OrderSide, OrderStatus
 
-SCHEMA_VERSION = "1.2.2"
+SCHEMA_VERSION = "1.3.0"
 
 
 class Evidence(BaseModel):
@@ -85,7 +85,7 @@ class OrderCreate(BaseModel):
     @model_validator(mode="after")
     def validate_order(self):
         if self.side == OrderSide.CONVERT:
-            raise ValueError("CONVERT_NOT_SUPPORTED: V1.2.2 暂不支持基金转换")
+            raise ValueError("CONVERT_NOT_SUPPORTED: V1.3 暂不支持基金转换")
         if self.side in {OrderSide.BUY, OrderSide.SELL}:
             if not self.fund_id:
                 raise ValueError("交易单必须指定 fund_id")

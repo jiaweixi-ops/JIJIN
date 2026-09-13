@@ -16,6 +16,7 @@ from app.api import (
     orders,
     portfolio,
     reconciliation,
+    research,
 )
 from app.config import get_settings
 from app.db import verify_schema_current
@@ -53,7 +54,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AI 场外基金公司",
     version=__version__,
-    description="个人研究 / 前瞻模拟盘。V1.3 开始接入可审计的每日运行编排；不接自动实盘。",
+    description="个人研究 / 前瞻模拟盘。V1.3 接入可审计研究流水线与每日运行编排；不接自动实盘。",
     lifespan=lifespan,
 )
 install_observability(app)
@@ -64,5 +65,6 @@ app.include_router(reconciliation.router)
 app.include_router(data_quality.router)
 app.include_router(credentials.router)
 app.include_router(decisions.router)
+app.include_router(research.router)
 app.include_router(operations.router)
 app.include_router(feishu.router)
