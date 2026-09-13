@@ -65,7 +65,13 @@ AI 预算由环境变量控制：
 - `AI_DAILY_MAX_ESTIMATED_COST`
 - 三家模型各自的 input/output 每百万 token 价格
 
-价格单位由 `AI_COST_CURRENCY` 指定。价格保持 `0` 表示当前没有配置可靠价格，此时仍执行字符/token/call-count 配额，但成本估算为 0。配置成本上限时，Gateway 会在调用前按“输入字符最多按同等 token + 最大输出 token”进行保守预算，避免明知超预算仍发起模型请求。
+价格单位由 `AI_COST_CURRENCY` 指定。价格保持 `0` 表示当前没有配置可靠价格，此时仍执行字符/token/call-count 配额，但金额成本为 0。
+
+配置价格后，Gateway 的调用前预算使用**故意偏高的上界**：ASCII/窄字符按 1 token/字符预留，CJK/东亚宽字符按 2 token/字符预留，并始终预留 `AI_MAX_OUTPUT_TOKENS`。这不是 tokenizer 的精确估算，而是成本闸门的 fail-closed 上界。
+
+模型返回 `usage.prompt_tokens` / `usage.completion_tokens` 时，调用后成本按 provider usage 记账；任一字段缺失、非法或为负时，对缺失部分改用上述保守输入 token 上界或 `AI_MAX_OUTPUT_TOKENS` 兜底，因此不会再因为 provider 不返回 usage 而把该次成本记成 0。为保留“provider 是否真的回了 token”的语义，`AIUsageLedger.input_tokens/output_tokens` 仍保存 provider 原值；缺失时可以为 NULL，但 `estimated_cost` 仍会是保守非零估算。
+
+V1.2.2 的每日调用/成本闸门仍是“查询当日累计 → 判断 → 调用 → 写入 usage”的 best-effort 方案，不是严格串行的预算预留器。个人单操作者/低并发场景可接受；多 worker 并发时可能出现小幅超限。若以后要求严格额度，应改为按主体+UTC 日的原子计数/预算预留行，并用条件更新或数据库行锁实现。
 
 ## 数据库迁移
 
@@ -118,6 +124,8 @@ uvicorn app.main:app --reload
 ruff check .
 pytest
 ```
+
+> **V1.2.2 数据质量启动要求：** `seed_demo.py` 只为演示基金自动造可信数据源、规则快照和 confirmed NAV。接入任何真实基金时，必须先通过 `PUT /data-quality/sources/{name}` 注册/启用数据源，再通过 `POST /data-quality/funds/{fund_id}/rules` 摄入最新规则快照，并提供可用 NAV；否则 `DataQualityGate` 会按设计返回 RED，研究交易候选/新订单会被阻断。这不是升级故障。
 
 生产/准生产环境必须配置 `INTERNAL_API_TOKEN`。若需要签发人工凭证，还必须配置独立的强随机 `API_CREDENTIAL_PEPPER`；该 pepper 不下发给客户端。若启用飞书，还必须完整配置飞书验签参数。
 
