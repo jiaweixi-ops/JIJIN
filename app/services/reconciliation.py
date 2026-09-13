@@ -86,6 +86,7 @@ class ReconciliationService:
         run.summary = {
             **(run.summary or {}),
             "all_ok": all_ok,
+            "had_diffs": not all_ok,
             "derived_from_diffs": True,
         }
         self.db.commit()
@@ -135,6 +136,11 @@ class ReconciliationService:
         )
         if remaining is None:
             run.status = ReconciliationStatus.RESOLVED
-            run.summary = {**(run.summary or {}), "resolved": True}
+            run.summary = {
+                **(run.summary or {}),
+                "all_ok": True,
+                "had_diffs": True,
+                "resolved": True,
+            }
         self.db.commit()
         return run

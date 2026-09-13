@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -14,5 +17,58 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -e '.[dev]'
-      - run: python -m compileall -q app tests scripts
+      - name: Ruff
+        run: ruff check .
+      - run: python -m compileall -q app tests scripts alembic
+      - name: Verify Alembic fresh upgrade on SQLite
+        run: DATABASE_URL=sqlite:///./ci-migration.db alembic upgrade head
       - run: pytest
+
+  migration-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: jijin_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d jijin_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/jijin_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[postgres]'
+      - name: Verify Alembic fresh upgrade on PostgreSQL
+        run: alembic upgrade head
+      - name: Verify database is at Alembic head
+        run: alembic current
+
+  container-hardening:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build hardened image
+        run: docker build -t jijin-ci .
+      - name: Verify non-root user and healthcheck
+        run: |
+          test "$(docker image inspect jijin-ci --format '{{.Config.User}}')" = "app"
+          test "$(docker image inspect jijin-ci --format '{{json .Config.Healthcheck.Test}}')" != "null"
+      - name: Validate Compose configuration
+        env:
+          POSTGRES_PASSWORD: ci-only-postgres-password
+          DATABASE_URL: postgresql+psycopg://jijin:ci-only-postgres-password@postgres:5432/jijin
+          INTERNAL_API_TOKEN: ci-only-internal-token-not-for-production
+        run: |
+          cp .env.compose.example .env
+          docker compose config --quiet
+          docker compose config | grep -q '127.0.0.1'

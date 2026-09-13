@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -36,9 +37,36 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def init_db() -> None:
-    from app import models  # noqa: F401
-    from app import security_models  # noqa: F401
-    from app import snapshot_models  # noqa: F401
+def expected_schema_heads() -> set[str]:
+    """Return the Alembic heads shipped with this application build."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
 
-    Base.metadata.create_all(bind=engine)
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "alembic"))
+    return set(ScriptDirectory.from_config(config).get_heads())
+
+
+def verify_schema_current() -> None:
+    """Fail fast when the database has not been migrated to this build's head.
+
+    Schema creation/upgrades are intentionally not performed at application startup.
+    Operators must run `alembic upgrade head` before starting the service.
+    """
+    expected = expected_schema_heads()
+    with engine.connect() as connection:
+        if not inspect(connection).has_table("alembic_version"):
+            raise RuntimeError(
+                "database is not Alembic-managed; run `alembic upgrade head` before startup"
+            )
+        current = {
+            row[0]
+            for row in connection.execute(text("SELECT version_num FROM alembic_version"))
+        }
+    if current != expected:
+        raise RuntimeError(
+            "database schema revision mismatch: "
+            f"current={sorted(current)!r} expected={sorted(expected)!r}; "
+            "run `alembic upgrade head`"
+        )

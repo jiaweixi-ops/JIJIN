@@ -114,13 +114,6 @@ def _audit(
 
 def _business_error_response(exc: Exception) -> tuple[int, dict]:
     """Map expected business rejections to stable user-facing callback responses."""
-    if isinstance(exc, HTTPException):
-        detail = exc.detail if isinstance(exc.detail, str) else "请求被拒绝"
-        return exc.status_code, {
-            "ok": False,
-            "message": detail,
-            "error": "HTTP_REJECTION",
-        }
     if isinstance(exc, StaleOrderVersion):
         return 409, {
             "ok": False,
@@ -133,6 +126,13 @@ def _business_error_response(exc: Exception) -> tuple[int, dict]:
             "message": "当前订单状态不允许执行此操作，请刷新最新交易卡片",
             "error": "INVALID_TRANSITION",
         }
+    if isinstance(exc, HTTPException):
+        detail = exc.detail if isinstance(exc.detail, str) else "请求被拒绝"
+        return exc.status_code, {
+            "ok": False,
+            "message": detail,
+            "error": "HTTP_REJECTION",
+        }
     return 400, {
         "ok": False,
         "message": str(exc) or "请求无法执行",
@@ -144,16 +144,22 @@ def _persist_callback_response(
     db: Session,
     event_id: str,
     nonce: str,
+    status_code: int,
     response: dict,
-) -> dict:
+) -> tuple[int, dict]:
     """Persist an idempotent callback result even if the business path rolled back."""
     db.rollback()
     callback = db.scalar(select(FeishuCallback).where(FeishuCallback.event_id == event_id))
     if callback is not None and callback.response:
-        return callback.response
+        return callback.status_code, callback.response
 
     if callback is None:
-        callback = FeishuCallback(event_id=event_id, nonce=nonce, response={})
+        callback = FeishuCallback(
+            event_id=event_id,
+            nonce=nonce,
+            response={},
+            status_code=status_code,
+        )
         db.add(callback)
         try:
             db.flush()
@@ -165,10 +171,18 @@ def _persist_callback_response(
             if callback is None:
                 raise
             if callback.response:
-                return callback.response
+                return callback.status_code, callback.response
 
     callback.response = response
+    callback.status_code = status_code
     db.commit()
+    return status_code, response
+
+
+def _replay_callback(callback: FeishuCallback):
+    response = callback.response or {"ok": True, "duplicate": True}
+    if callback.status_code != 200:
+        return JSONResponse(status_code=callback.status_code, content=response)
     return response
 
 
@@ -185,10 +199,7 @@ def _handle_command(db: Session, open_id: str, text: str) -> dict:
     order = db.get(Order, session.current_order_id)
     if not order:
         raise HTTPException(404, "order not found")
-    try:
-        assert_version(order.version, session.current_order_version or -1)
-    except StaleOrderVersion as exc:
-        raise HTTPException(409, str(exc)) from exc
+    assert_version(order.version, session.current_order_version or -1)
 
     if (
         cmd.intent in {"add_amount", "set_amount", "set_ratio", "cancel"}
@@ -301,10 +312,7 @@ def _handle_card_action(
     order = db.get(Order, order_id)
     if not order:
         raise HTTPException(404, "order not found")
-    try:
-        assert_version(order.version, version)
-    except StaleOrderVersion as exc:
-        raise HTTPException(409, str(exc)) from exc
+    assert_version(order.version, version)
 
     session = _bind_session(db, open_id, order, chat_id)
     if action == "why":
@@ -446,12 +454,13 @@ async def feishu_events(
 
     prior = db.scalar(select(FeishuCallback).where(FeishuCallback.event_id == event_id))
     if prior:
-        return prior.response or {"ok": True, "duplicate": True}
+        return _replay_callback(prior)
 
     callback = FeishuCallback(
         event_id=event_id,
         nonce=x_lark_request_nonce,
         response={},
+        status_code=200,
     )
     db.add(callback)
     try:
@@ -459,7 +468,9 @@ async def feishu_events(
     except IntegrityError:
         db.rollback()
         prior = db.scalar(select(FeishuCallback).where(FeishuCallback.event_id == event_id))
-        return (prior.response if prior else None) or {"ok": True, "duplicate": True}
+        if prior:
+            return _replay_callback(prior)
+        return {"ok": True, "duplicate": True}
 
     try:
         response: dict = {"ok": True}
@@ -472,10 +483,11 @@ async def feishu_events(
                 response = _handle_command(db, open_id, text)
     except (StaleOrderVersion, InvalidTransition, ValueError, HTTPException) as exc:
         status_code, response = _business_error_response(exc)
-        response = _persist_callback_response(
+        status_code, response = _persist_callback_response(
             db,
             event_id,
             x_lark_request_nonce,
+            status_code,
             response,
         )
         return JSONResponse(status_code=status_code, content=response)
@@ -485,5 +497,6 @@ async def feishu_events(
 
     callback = db.scalar(select(FeishuCallback).where(FeishuCallback.event_id == event_id)) or callback
     callback.response = response
+    callback.status_code = 200
     db.commit()
     return response

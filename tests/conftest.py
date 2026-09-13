@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app import models, snapshot_models  # noqa: F401
+from app import hardening_models, models, security_models, snapshot_models  # noqa: F401
 from app.db import Base
 
 

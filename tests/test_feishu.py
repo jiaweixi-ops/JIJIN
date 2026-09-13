@@ -6,8 +6,9 @@ from decimal import Decimal
 from fastapi import Request
 from sqlalchemy import select
 
-from app.api.feishu import feishu_events
+from app.api.feishu import _business_error_response, feishu_events
 from app.config import Settings
+from app.domain.order_state import StaleOrderVersion
 from app.enums import AccountType, OrderSide, OrderStatus, Role
 from app.models import Account, Fund, Order, User
 from app.schemas import OrderView
@@ -67,6 +68,14 @@ def test_order_view_attaches_utc_offset_to_naive_persisted_timestamps():
     assert view.cutoff_at is not None
     assert view.cutoff_at.utcoffset() is not None
     assert view.model_dump(mode="json")["cutoff_at"].endswith("Z")
+
+
+def test_stale_order_version_keeps_dedicated_callback_error_code():
+    status_code, body = _business_error_response(
+        StaleOrderVersion("订单版本已过期：当前 v2，请求 v1")
+    )
+    assert status_code == 409
+    assert body["error"] == "STALE_ORDER_VERSION"
 
 
 def _request_with_body(body: bytes) -> Request:
@@ -160,6 +169,7 @@ def test_feishu_business_rejection_is_persisted_and_replay_is_idempotent(db, mon
     callback = db.scalar(select(FeishuCallback).where(FeishuCallback.event_id == event_id))
     assert callback is not None
     assert callback.response == first_body
+    assert callback.status_code == 400
 
     replay = asyncio.run(
         feishu_events(
@@ -170,4 +180,5 @@ def test_feishu_business_rejection_is_persisted_and_replay_is_idempotent(db, mon
             x_lark_signature="sig",
         )
     )
-    assert replay == first_body
+    assert replay.status_code == 400
+    assert json.loads(replay.body) == first_body
