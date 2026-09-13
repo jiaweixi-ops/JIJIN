@@ -4,10 +4,49 @@ import logging
 
 from app.config import get_settings
 from app.db import SessionLocal
+from app.services.operational_orchestrator import OperationalOrchestrator
 from app.services.order_service import OrderService
 from app.services.simulation_broker import SimulationBroker
 
 log = logging.getLogger(__name__)
+
+
+def _run_operational_job(job_name: str) -> None:
+    settings = get_settings()
+    with SessionLocal() as db:
+        try:
+            run = OperationalOrchestrator(db, settings).run(
+                job_name,
+                trigger="scheduler",
+            )
+            logger = log.warning if run.status in {"FAILED", "PARTIAL"} else log.info
+            logger(
+                "operational job finished job=%s run_id=%s status=%s attempt=%s summary=%s",
+                job_name,
+                run.id,
+                run.status,
+                run.attempt,
+                run.summary,
+            )
+        except Exception:
+            db.rollback()
+            log.exception("operational scheduler wrapper failed job=%s", job_name)
+
+
+def _morning_brief() -> None:
+    _run_operational_job("morning_brief")
+
+
+def _early_cutoff() -> None:
+    _run_operational_job("early_cutoff")
+
+
+def _decision_window() -> None:
+    _run_operational_job("decision_window")
+
+
+def _month_end_probe() -> None:
+    _run_operational_job("month_end_probe")
 
 
 def _settle_due_cash() -> None:
@@ -31,43 +70,38 @@ def build_scheduler():
 
     settings = get_settings()
     scheduler = BackgroundScheduler(timezone=settings.timezone)
-
-    def morning_job():
-        log.info("08:45 盘前简报触发")
-
-    def early_cutoff_alert():
-        log.info("13:30 提前截止/特殊基金提醒触发")
-
-    def decision_job():
-        log.info("14:00 模拟盘交易候选卡触发")
-
-    def month_end_probe():
-        log.info("20:30 月末检查触发；业务层判断是否为当月最后交易日")
+    common = {
+        "replace_existing": True,
+        "max_instances": 1,
+        "coalesce": True,
+        "misfire_grace_time": 600,
+    }
 
     scheduler.add_job(
-        morning_job,
+        _morning_brief,
         CronTrigger(day_of_week="mon-fri", hour=8, minute=45),
         id="morning_brief",
-        replace_existing=True,
+        **common,
     )
     scheduler.add_job(
-        early_cutoff_alert,
+        _early_cutoff,
         CronTrigger(day_of_week="mon-fri", hour=13, minute=30),
         id="early_cutoff",
-        replace_existing=True,
+        **common,
     )
     scheduler.add_job(
-        decision_job,
+        _decision_window,
         CronTrigger(day_of_week="mon-fri", hour=14, minute=0),
-        id="decision_card",
-        replace_existing=True,
+        id="decision_window",
+        **common,
     )
     scheduler.add_job(
-        month_end_probe,
+        _month_end_probe,
         CronTrigger(day_of_week="mon-fri", hour=20, minute=30),
         id="month_end_probe",
-        replace_existing=True,
+        **common,
     )
+
     # Settlement is idempotent: each cash-flow row is claimed by status before
     # account balances are moved. Polling keeps platform-specific T+N arrival
     # times from being tied to a single hard-coded daily clock.
@@ -78,5 +112,6 @@ def build_scheduler():
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=600,
     )
     return scheduler
