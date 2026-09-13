@@ -15,6 +15,7 @@ from app.enums import AccountType, DataQualityLevel, OrderSide, OrderStatus, Rol
 from app.models import Account, DataQuality, DataSource, Fund, NavConfirm, Order, User
 from app.research_models import ResearchEvidence
 from app.research_schemas import ResearchInboxCreate, ResearchMaterialIn
+from app.services.ai_gateway import AIUnavailable
 from app.services.research_pipeline import ResearchIdempotencyConflict, ResearchPipelineService
 
 NOW = datetime(2026, 9, 11, 5, 0, tzinfo=timezone.utc)
@@ -124,9 +125,16 @@ def _payload(account: Account, fund: Fund, *, key: str = "research-key-001", con
 
 
 class FakeGateway:
-    def __init__(self, *, fund_code: str = "R001", source_url: str = SOURCE_URL):
+    def __init__(
+        self,
+        *,
+        fund_code: str = "R001",
+        source_url: str = SOURCE_URL,
+        deepseek_unavailable: bool = False,
+    ):
         self.fund_code = fund_code
         self.source_url = source_url
+        self.deepseek_unavailable = deepseek_unavailable
         self.calls: list[str] = []
 
     def call_structured(
@@ -165,6 +173,8 @@ class FakeGateway:
                 }
             )
         if provider == "deepseek":
+            if self.deepseek_unavailable:
+                raise AIUnavailable("deepseek unavailable in test")
             return schema.model_validate(
                 {
                     "as_of": NOW.isoformat(),
@@ -299,6 +309,50 @@ def test_research_pipeline_rejects_evidence_source_not_in_trusted_inbox(db):
     assert item.status == "FAILED"
     assert db.scalar(select(func.count(ResearchEvidence.id))) == 0
     assert db.scalar(select(func.count(Order.id))) == 0
+
+
+def test_cio_unavailable_blocks_and_retry_reuses_persisted_research_stages(db):
+    settings = _settings()
+    account, fund = _seed_target(db)
+    service = ResearchPipelineService(db, settings)
+    item = service.ingest(
+        _payload(account, fund, key="research-key-cio"),
+        actor_id="user-1",
+        now=NOW,
+    )
+    unavailable = FakeGateway(fund_code=fund.code, deepseek_unavailable=True)
+
+    blocked = service.process(
+        item.id,
+        quota_subject="user-1",
+        request_id="req-cio-down",
+        actor_id="user-1",
+        now=NOW,
+        gateway=unavailable,
+    )
+
+    assert unavailable.calls == ["kimi", "qwen", "deepseek"]
+    assert blocked.status == "BLOCKED"
+    assert blocked.last_error == "CIO_UNAVAILABLE"
+    assert blocked.research_packet
+    assert blocked.structured_packet
+    assert blocked.candidate_order_ids == []
+    assert db.scalar(select(func.count(Order.id))) == 0
+
+    recovered_gateway = FakeGateway(fund_code=fund.code)
+    recovered = service.process(
+        item.id,
+        quota_subject="user-1",
+        request_id="req-cio-recovered",
+        actor_id="user-1",
+        now=NOW,
+        gateway=recovered_gateway,
+    )
+
+    assert recovered.status == "PROCESSED"
+    assert recovered_gateway.calls == ["deepseek"]
+    assert len(recovered.candidate_order_ids) == 1
+    assert db.scalar(select(func.count(Order.id))) == 1
 
 
 def test_research_endpoints_require_internal_auth(db):
