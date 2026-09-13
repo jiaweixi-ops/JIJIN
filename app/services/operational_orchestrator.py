@@ -410,6 +410,7 @@ class OperationalOrchestrator:
                     "requires_emergency_confirmation": risk.requires_emergency_confirmation,
                     "lot_allocation": risk.lot_allocation,
                     "penalty_fee_snapshot": risk.penalty_fee_snapshot,
+                    "portfolio_risk": risk.portfolio_risk,
                     "research_quality": quality.research_quality.value,
                     "settlement_eligibility": quality.settlement_eligibility,
                     "quality_reasons": quality.reasons,
