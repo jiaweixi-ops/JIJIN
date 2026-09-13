@@ -120,7 +120,6 @@ def _payload(account: Account, fund: Fund, *, key: str = "research-key-001", con
                 content=content,
             )
         ],
-        python_metrics={"momentum_20d": 0.03},
     )
 
 
@@ -209,6 +208,7 @@ def test_research_ingestion_is_idempotent_and_rejects_key_reuse(db):
     assert replay.id == first.id
     assert first.status == "NEW"
     assert first.materials[0]["content_sha256"]
+    assert first.python_metrics == {}
 
     with pytest.raises(ResearchIdempotencyConflict):
         service.ingest(
@@ -236,6 +236,10 @@ def test_research_pipeline_persists_evidence_and_only_creates_suggested_order(db
 
     assert result.status == "PROCESSED"
     assert gateway.calls == ["kimi", "qwen", "deepseek"]
+    assert result.python_metrics["source"] == "python_deterministic"
+    assert result.python_metrics["fund_code"] == fund.code
+    assert result.python_metrics["available_cash"] == "100000.0000"
+    assert result.python_metrics["latest_confirmed_nav"] == "1.00000000"
     assert len(result.candidate_order_ids) == 1
 
     evidence = db.scalars(
@@ -282,6 +286,7 @@ def test_research_pipeline_blocks_red_quality_before_any_ai_call(db):
     assert result.status == "BLOCKED"
     assert result.last_error == "DATA_QUALITY_RED"
     assert result.candidate_order_ids == []
+    assert result.python_metrics["source"] == "python_deterministic"
     assert gateway.calls == []
     assert db.scalar(select(func.count(Order.id))) == 0
 
