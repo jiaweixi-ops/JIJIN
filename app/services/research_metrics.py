@@ -71,7 +71,7 @@ class ResearchMetricsService:
             "confirmed_nav_count": len(rows),
             "available_cash": str(account.available_cash),
             "frozen_cash": str(account.frozen_cash),
-            "cash_in_transit": str(account.cash_in_transit),
+            "cash_in_transit": str(account.in_transit_cash),
         }
         if not rows:
             result["insufficient_nav_history"] = True
