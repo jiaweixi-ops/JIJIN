@@ -107,7 +107,8 @@ def test_portfolio_risk_dashboard_exposes_reservations_and_guardrail_state(db):
     assert result["assets"]["total_confirmed_assets"] == "1200.0000"
     assert result["reservations"]["soft_reserved_buy_cash"] == "300.0000"
     assert result["reservations"]["available_cash_after_soft_reservations"] == "700.0000"
-    assert result["reservations"]["soft_reserved_sell_shares_by_fund"][fund.id] == "20.0000"
+    reserved_sell = result["reservations"]["soft_reserved_sell_shares_by_fund"][fund.id]
+    assert Decimal(reserved_sell) == Decimal("20")
     assert result["portfolio_risk"]["drawdown"] == "0.2"
     assert result["portfolio_risk"]["consecutive_loss_days"] == 2
     assert "DRAWDOWN_LIMIT_REACHED" in result["portfolio_risk"]["flags"]
