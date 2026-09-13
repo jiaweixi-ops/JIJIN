@@ -8,6 +8,7 @@ from app import (  # noqa: F401
     hardening_models,
     models,
     operational_models,
+    research_models,
     security_models,
     snapshot_models,
 )
