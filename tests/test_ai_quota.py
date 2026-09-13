@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 import pytest
@@ -96,3 +97,51 @@ def test_model_gateway_rejects_oversized_prompt_before_provider_call(db):
             "user-long",
         )
     assert called is False
+
+
+def test_missing_provider_usage_uses_conservative_fallback_cost(db, caplog):
+    gateway = ModelGateway(
+        _settings(ai_daily_max_calls_per_subject=10, ai_max_output_tokens=100),
+        db,
+        quota_subject="user-3",
+        request_id="req-fallback",
+    )
+    gateway.providers["kimi"].complete_json = lambda system, user: ({"value": 9}, {})
+
+    with caplog.at_level(logging.WARNING, logger="jijin.ai"):
+        result = gateway.call_structured(
+            "kimi",
+            "research",
+            "p1",
+            "s1",
+            DummyResult,
+            "中",
+            "文",
+        )
+
+    assert result.value == 9
+    usage = db.scalar(select(AIUsageLedger).order_by(AIUsageLedger.created_at.desc()))
+    log = db.scalar(select(ModelCallLog).order_by(ModelCallLog.created_at.desc()))
+
+    # "中\n文" => 2 + 1 + 2 conservative input tokens; reserve max 100 output tokens.
+    expected = Decimal("0.00041000")
+    assert Decimal(usage.estimated_cost) == expected
+    assert Decimal(log.estimated_cost) == expected
+    assert usage.input_tokens is None
+    assert usage.output_tokens is None
+    assert "provider_usage_missing_or_invalid" in caplog.text
+
+
+def test_cjk_projection_is_more_conservative_than_one_char_one_token(db):
+    gateway = ModelGateway(
+        _settings(
+            ai_daily_max_calls_per_subject=10,
+            ai_max_output_tokens=1,
+            kimi_output_cost_per_million=0,
+        ),
+        db,
+        quota_subject="user-4",
+    )
+
+    # Two CJK characters reserve four input tokens at 2 CNY / 1M tokens.
+    assert gateway._projected_max_cost("kimi", "中文") == Decimal("0.000008")
