@@ -180,6 +180,10 @@ def test_decision_window_risks_candidate_and_stops_at_human_confirmation(db):
     assert order.status == OrderStatus.PENDING_CONFIRM
     assert order.risk_snapshot["passed"] is True
     assert order.risk_snapshot["source"] == "operational_orchestrator"
+    assert order.risk_snapshot["portfolio_risk"]["valuation_complete"] is True
+    assert Decimal(
+        order.risk_snapshot["portfolio_risk"]["projected_single_fund_weight"]
+    ) == Decimal("0.01")
     assert order.data_snapshot["valuation_date"] == "2026-09-11"
     assert order.data_snapshot["frozen_marker"] == "keep"
     # V1.3 orchestration must never auto-approve or auto-submit.
