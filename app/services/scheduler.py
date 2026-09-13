@@ -7,6 +7,7 @@ from app.db import SessionLocal
 from app.services.calendar import TradingCalendarService
 from app.services.operational_orchestrator import OperationalOrchestrator
 from app.services.order_service import OrderService
+from app.services.research_collection import ResearchCollectionService
 from app.services.research_pipeline import ResearchPipelineService
 from app.services.simulation_broker import SimulationBroker
 
@@ -37,6 +38,18 @@ def _run_operational_job(job_name: str) -> None:
 
 def _morning_brief() -> None:
     _run_operational_job("morning_brief")
+
+
+def _research_collection() -> None:
+    settings = get_settings()
+    with SessionLocal() as db:
+        try:
+            summary = ResearchCollectionService(db, settings).collect_enabled()
+            logger = log.warning if summary["failed"] else log.info
+            logger("research collection batch finished summary=%s", summary)
+        except Exception:
+            db.rollback()
+            log.exception("research collection scheduler wrapper failed")
 
 
 def _research_pipeline() -> None:
@@ -99,10 +112,26 @@ def build_scheduler():
         "misfire_grace_time": 600,
     }
 
+    # Two collection passes give the morning brief/research inbox a fresh baseline
+    # and refresh trusted feeds immediately before the 13:15 AI research pipeline.
+    # Only explicitly registered sources are fetched; arbitrary URLs are never
+    # accepted by the scheduler.
+    scheduler.add_job(
+        _research_collection,
+        CronTrigger(day_of_week="mon-fri", hour=8, minute=15),
+        id="research_collection_morning",
+        **common,
+    )
     scheduler.add_job(
         _morning_brief,
         CronTrigger(day_of_week="mon-fri", hour=8, minute=45),
         id="morning_brief",
+        **common,
+    )
+    scheduler.add_job(
+        _research_collection,
+        CronTrigger(day_of_week="mon-fri", hour=12, minute=45),
+        id="research_collection_predecision",
         **common,
     )
     # Trusted inbox material is converted into auditable SUGGESTED candidates
