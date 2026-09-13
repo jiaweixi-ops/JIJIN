@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, TypeVar
 
 import httpx
@@ -18,6 +20,7 @@ from app.hardening_models import AIUsageLedger
 from app.models import ModelCallLog
 
 T = TypeVar("T", bound=BaseModel)
+log = logging.getLogger("jijin.ai")
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,17 @@ def _strip_json_fence(content: str) -> str:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
     return text
+
+
+def _conservative_input_token_upper_bound(text: str) -> int:
+    """Return a deliberately conservative token upper bound for budget control.
+
+    This is not a tokenizer replacement. Narrow/ASCII-like characters are charged as
+    one token each, while East-Asian wide/full-width characters (CJK, kana, Hangul,
+    full-width punctuation and similar code points) are charged as two tokens each.
+    The result is intentionally biased high so budget enforcement fails closed.
+    """
+    return sum(2 if unicodedata.east_asian_width(ch) in {"W", "F"} else 1 for ch in text)
 
 
 class OpenAICompatibleProvider:
@@ -175,25 +189,52 @@ class ModelGateway:
         current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         return datetime.combine(current.date(), dt_time.min, tzinfo=timezone.utc)
 
-    def _estimated_cost(self, provider: str, usage: dict[str, Any]) -> Decimal:
+    @staticmethod
+    def _usage_token_or_fallback(value: Any, fallback: int) -> tuple[Decimal, bool]:
+        if value is None:
+            return Decimal(fallback), True
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return Decimal(fallback), True
+        if parsed < 0:
+            return Decimal(fallback), True
+        return parsed, False
+
+    def _estimated_cost(
+        self,
+        provider: str,
+        usage: dict[str, Any],
+        *,
+        fallback_input_tokens: int,
+        fallback_output_tokens: int,
+    ) -> tuple[Decimal, bool]:
+        """Return estimated cost and whether provider usage fallback was required."""
         cfg = self.providers[provider].cfg
-        input_tokens = Decimal(str(usage.get("prompt_tokens") or 0))
-        output_tokens = Decimal(str(usage.get("completion_tokens") or 0))
-        return (
+        input_tokens, input_fallback = self._usage_token_or_fallback(
+            usage.get("prompt_tokens"), fallback_input_tokens
+        )
+        output_tokens, output_fallback = self._usage_token_or_fallback(
+            usage.get("completion_tokens"), fallback_output_tokens
+        )
+        cost = (
             input_tokens * cfg.input_cost_per_million
             + output_tokens * cfg.output_cost_per_million
         ) / Decimal("1000000")
+        return cost, input_fallback or output_fallback
 
-    def _projected_max_cost(self, provider: str, input_chars: int) -> Decimal:
+    def _projected_max_cost(self, provider: str, input_text: str) -> Decimal:
         """Conservative pre-call budget reservation.
 
-        We treat one input character as up to one token and reserve the configured
-        maximum output tokens. This intentionally overestimates common prompts so
-        a configured daily cost ceiling fails closed rather than overshooting.
+        ASCII/narrow characters are reserved as one token each. East-Asian
+        wide/full-width characters are reserved as two tokens each. The configured
+        maximum output token count is always reserved. This is intentionally an
+        upper-bound heuristic, not a tokenizer estimate.
         """
         cfg = self.providers[provider].cfg
+        input_tokens = _conservative_input_token_upper_bound(input_text)
         return (
-            Decimal(input_chars) * cfg.input_cost_per_million
+            Decimal(input_tokens) * cfg.input_cost_per_million
             + Decimal(cfg.max_output_tokens) * cfg.output_cost_per_million
         ) / Decimal("1000000")
 
@@ -233,10 +274,23 @@ class ModelGateway:
                     )
                 )
                 usage_db.commit()
-        except Exception:
-            return
+        except Exception as exc:
+            log.warning(
+                "ai_usage_ledger_write_failed provider=%s role=%s subject=%s request_id=%s error=%r",
+                provider,
+                role_name,
+                self.quota_subject,
+                self.request_id,
+                exc,
+            )
 
-    def _enforce_quota(self, provider: str, role_name: str, input_chars: int) -> None:
+    def _enforce_quota(
+        self,
+        provider: str,
+        role_name: str,
+        input_chars: int,
+        input_text: str,
+    ) -> None:
         if input_chars > self.settings.ai_max_request_chars:
             message = (
                 f"AI request too large: {input_chars} chars > "
@@ -274,7 +328,11 @@ class ModelGateway:
                 )
             ) or Decimal("0")
 
-        projected = self._projected_max_cost(provider, input_chars)
+        # V1.2.2 is a personal/single-operator tool. This aggregate check is
+        # deliberately best-effort rather than a serialized reservation; concurrent
+        # workers may overshoot by a small bounded amount. A strict multi-worker
+        # deployment needs a daily counter/reservation row with atomic update/locking.
+        projected = self._projected_max_cost(provider, input_text)
         if used_calls >= self.settings.ai_daily_max_calls_per_subject:
             message = "AI daily call quota exceeded"
         elif (
@@ -336,8 +394,15 @@ class ModelGateway:
                     )
                 )
                 log_db.commit()
-        except Exception:
-            return
+        except Exception as exc:
+            log.warning(
+                "model_call_log_write_failed provider=%s role=%s subject=%s request_id=%s error=%r",
+                provider,
+                role_name,
+                self.quota_subject,
+                self.request_id,
+                exc,
+            )
 
     def call_structured(
         self,
@@ -352,16 +417,34 @@ class ModelGateway:
         if provider not in self.providers:
             raise AIUnavailable(f"unknown provider: {provider}")
 
+        input_text = system + "\n" + user
         input_chars = len(system) + len(user)
-        self._enforce_quota(provider, role_name, input_chars)
-        input_hash = hashlib.sha256((system + "\n" + user).encode()).hexdigest()
+        self._enforce_quota(provider, role_name, input_chars, input_text)
+        input_hash = hashlib.sha256(input_text.encode()).hexdigest()
         success = False
         error = ""
         usage: dict[str, Any] = {}
         estimated_cost = Decimal("0")
         try:
             raw, usage = self.providers[provider].complete_json(system, user)
-            estimated_cost = self._estimated_cost(provider, usage)
+            fallback_input_tokens = _conservative_input_token_upper_bound(input_text)
+            estimated_cost, used_fallback = self._estimated_cost(
+                provider,
+                usage,
+                fallback_input_tokens=fallback_input_tokens,
+                fallback_output_tokens=self.providers[provider].cfg.max_output_tokens,
+            )
+            if used_fallback:
+                log.warning(
+                    "provider_usage_missing_or_invalid provider=%s role=%s subject=%s "
+                    "request_id=%s fallback_input_tokens=%s fallback_output_tokens=%s",
+                    provider,
+                    role_name,
+                    self.quota_subject,
+                    self.request_id,
+                    fallback_input_tokens,
+                    self.providers[provider].cfg.max_output_tokens,
+                )
             result = schema.model_validate(raw)
             success = True
             return result
