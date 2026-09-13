@@ -4,6 +4,7 @@ import logging
 
 from app.config import get_settings
 from app.db import SessionLocal
+from app.services.calendar import TradingCalendarService
 from app.services.operational_orchestrator import OperationalOrchestrator
 from app.services.order_service import OrderService
 from app.services.research_pipeline import ResearchPipelineService
@@ -42,6 +43,14 @@ def _research_pipeline() -> None:
     settings = get_settings()
     with SessionLocal() as db:
         try:
+            calendar = TradingCalendarService(db, settings.timezone)
+            business_date = calendar.local_now().date()
+            if not calendar.is_open(business_date, "CN"):
+                log.info(
+                    "research pipeline skipped reason=CN_MARKET_CLOSED business_date=%s",
+                    business_date,
+                )
+                return
             summary = ResearchPipelineService(db, settings).process_pending()
             logger = log.warning if summary["failed"] else log.info
             logger("research pipeline batch finished summary=%s", summary)
@@ -98,7 +107,7 @@ def build_scheduler():
     )
     # Trusted inbox material is converted into auditable SUGGESTED candidates
     # before the 13:30 early-cutoff and 14:00 normal risk windows. The research
-    # pipeline never approves or submits an order.
+    # pipeline never approves or submits an order and skips closed CN market days.
     scheduler.add_job(
         _research_pipeline,
         CronTrigger(day_of_week="mon-fri", hour=13, minute=15),
