@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -107,6 +107,81 @@ def _format_local_time(value: datetime | None, timezone_name: str) -> str:
     return _as_utc(value).astimezone(ZoneInfo(timezone_name)).strftime("%H:%M")
 
 
+def _format_percent(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{Decimal(str(value)) * Decimal('100'):.2f}%"
+    except (InvalidOperation, ValueError):
+        return "-"
+
+
+def _format_money(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"¥{Decimal(str(value)):,.2f}"
+    except (InvalidOperation, ValueError):
+        return "-"
+
+
+def _portfolio_risk_lines(order: Order, settings: Settings) -> list[str]:
+    snapshot = (order.risk_snapshot or {}).get("portfolio_risk") or {}
+    if not isinstance(snapshot, dict) or not snapshot:
+        return []
+
+    lines: list[str] = []
+    projected_weight = snapshot.get("projected_single_fund_weight")
+    if projected_weight is not None:
+        lines.append(
+            "单基金投影："
+            f"{_format_percent(projected_weight)} / "
+            f"上限 {_format_percent(settings.max_single_fund_weight)}"
+        )
+
+    projected_daily = snapshot.get("projected_daily_trade_ratio")
+    if projected_daily is not None:
+        lines.append(
+            "当日交易投影："
+            f"{_format_percent(projected_daily)} / "
+            f"上限 {_format_percent(settings.max_daily_trade_ratio)}"
+        )
+
+    drawdown = snapshot.get("portfolio_drawdown")
+    if drawdown is not None:
+        lines.append(
+            "组合回撤："
+            f"{_format_percent(drawdown)} / "
+            f"保护线 {_format_percent(settings.max_portfolio_drawdown)}"
+        )
+
+    loss_days = snapshot.get("consecutive_loss_days")
+    if loss_days is not None:
+        lines.append(
+            f"连续亏损：{loss_days} / {settings.max_consecutive_loss_days} 天"
+        )
+
+    if order.side == OrderSide.BUY:
+        available_after = snapshot.get("available_cash_after_reservations")
+        soft_reserved = snapshot.get("soft_reserved_cash")
+        if available_after is not None:
+            lines.append(
+                "软预留："
+                f"已占用 {_format_money(soft_reserved)}，"
+                f"剩余可用 {_format_money(available_after)}"
+            )
+    elif order.side == OrderSide.SELL:
+        reserved_shares = snapshot.get("soft_reserved_sell_shares")
+        if reserved_shares is not None:
+            lines.append(f"其他待确认 SELL 已软预留：{reserved_shares} 份")
+
+    if snapshot.get("valuation_complete") is False:
+        missing = snapshot.get("missing_nav_fund_ids") or []
+        suffix = f"（{len(missing)} 只持仓缺少已确认 NAV）" if missing else ""
+        lines.append(f"⚠️ 组合估值不完整{suffix}")
+    return lines
+
+
 def trade_card(
     order: Order,
     fund: Fund,
@@ -114,7 +189,8 @@ def trade_card(
     data_timestamp: str = "-",
     timezone_name: str | None = None,
 ) -> dict[str, Any]:
-    timezone_name = timezone_name or get_settings().timezone
+    settings = get_settings()
+    timezone_name = timezone_name or settings.timezone
     if order.side == OrderSide.BUY:
         color, label, font = "red", "🔴 买入", "red"
     elif order.side == OrderSide.SELL:
@@ -129,6 +205,10 @@ def trade_card(
     )
     cutoff = _format_local_time(order.cutoff_at, timezone_name)
     expiry = _format_local_time(order.expires_at, timezone_name)
+    risk_lines = _portfolio_risk_lines(order, settings)
+    risk_block = ""
+    if risk_lines:
+        risk_block = "\n**组合风控快照**\n" + "\n".join(f"- {line}" for line in risk_lines)
     content = (
         f"<font color='{font}'>**{label}｜{fund.code} {fund.name}**</font>\n"
         f"板块：{fund.board}　份额类别：{fund.share_class}\n"
@@ -136,7 +216,8 @@ def trade_card(
         f"订单：`{order.id}`　版本：v{order.version}\n"
         f"截止：{cutoff}　卡片有效至：{expiry}\n"
         f"数据时间戳：{data_timestamp}　风控：{risk_status}\n"
-        f"理由：{order.reason or '-'}\n"
+        f"理由：{order.reason or '-'}"
+        f"{risk_block}\n"
         "> 本卡仅用于模拟盘；份额/金额在正式净值确认前均为预计值。"
     )
     return {
