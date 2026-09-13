@@ -45,13 +45,58 @@ AI Gateway 在调用模型前执行：
 4. `AI_DAILY_MAX_CALLS_PER_SUBJECT`：按认证用户/system 主体计算的 UTC 日调用上限。
 5. `AI_DAILY_MAX_ESTIMATED_COST`：按当前已用成本 + 本次保守最大成本判断是否允许继续调用。
 
-成本价格使用每百万 token 的 input/output 单价，分别配置 DeepSeek、Qwen、Kimi。`AIUsageLedger` 记录 quota subject、request ID、模型、字符数、token、估算成本、成功/拒绝与错误；`ModelCallLog.estimated_cost` 同步记录单次模型成本。
+成本价格使用每百万 token 的 input/output 单价，分别配置 DeepSeek、Qwen、Kimi。`AIUsageLedger` 记录 quota subject、request ID、模型、字符数、provider token、估算成本、成功/拒绝与错误；`ModelCallLog.estimated_cost` 同步记录单次模型成本。
 
 `GET /decisions/quota` 可查看当前认证主体当日使用量和上限。配额拒绝返回 HTTP 429，不调用模型。
 
-预算投影故意偏保守：输入字符按最多同数量 token 估算，并预留 `AI_MAX_OUTPUT_TOKENS`。目的是宁可提前拒绝，也不在已知会越过日成本上限时继续烧模型预算。
+### 调用前预算投影
+
+预算投影不是 tokenizer 精确预测，而是故意偏高的 fail-closed 上界：
+
+- ASCII/窄字符：按 1 token / 字符预留；
+- CJK、Kana、Hangul、全角标点等 East-Asian wide/full-width 字符：按 2 token / 字符预留；
+- 输出始终预留完整 `AI_MAX_OUTPUT_TOKENS`。
+
+因此英文通常明显偏保守，中文也不再采用“1 字符 = 1 token”的假设。该公式的目的只有一个：在已知预算边界内宁可提前拒绝，也不要乐观低估成本。
+
+### Provider usage 缺失兜底
+
+模型调用成功后优先使用 provider 返回的 `usage.prompt_tokens` / `usage.completion_tokens` 计算成本。若任一 token 字段：
+
+- 不存在；
+- 不是合法数字；
+- 为负数；
+
+则该字段使用保守兜底：输入使用上述 CJK-aware token 上界，输出使用完整 `AI_MAX_OUTPUT_TOKENS`。因此即使 provider 不返回 `usage`，当价格配置为非 0 时，本次 `estimated_cost` 仍会进入 `AIUsageLedger`，后续日累计成本闸门不会退化成只看“下一次投影”。
+
+为了不把估算值伪装成 provider 实际值，`AIUsageLedger.input_tokens/output_tokens` 与 `ModelCallLog.input_tokens/output_tokens` 仍保存 provider 原始 token 字段；provider 没返回时这些列可以为 NULL，而 `estimated_cost` 使用保守估算。系统同时写 `provider_usage_missing_or_invalid` WARNING，方便运维追踪哪些供应商/模型经常缺 usage。
+
+### 并发边界
+
+V1.2.2 仍采用：
+
+```text
+读取主体当日累计 → 判断是否允许 → 调用模型 → 写 AIUsageLedger
+```
+
+这不是原子预算预留。在两个或多个 worker 同时通过检查时，调用次数或日成本可能小幅超限。对当前个人研究/低并发模拟盘，这是明确接受的 V1.2.2 边界，而不是“严格配额”。
+
+若未来变成多用户或高并发服务，需要升级为 `quota_subject + UTC date` 唯一的日计数/预算行，在模型调用前执行原子条件更新/`SELECT ... FOR UPDATE` 预算预留；调用失败再按规则释放或冲销。不要仅在现有 aggregate query 外层加普通事务并宣称已解决竞态。
+
+### 记账失败可观测性
+
+`AIUsageLedger` / `ModelCallLog` 仍使用独立 session，避免日志提交污染订单事务。但持久化失败不再静默吞掉：会记录 `WARNING`，包含 provider、role、quota subject、request ID 和异常。这样即使记账后端故障导致额度统计暂时不完整，也能从日志/监控发现，而不是静默退化。
+
+建议增加告警：
+
+- `ai_usage_ledger_write_failed`
+- `model_call_log_write_failed`
+- `provider_usage_missing_or_invalid`
+- AI 429 / denied usage 异常抬升
 
 ## DataQuality 数据源接线
+
+> **升级后重要行为变化：V1.2.2 不再把基金规则状态默认视为可信。每只要参与研究交易候选/新订单的基金，都必须先注册已启用的数据源并摄入最新规则快照；否则 `DataQualityGate` 会按设计返回 RED。**
 
 `DataQualityGate` 不再默认“交易状态已知/公告正常”。运行前需要先注册可信数据源：
 
@@ -77,6 +122,8 @@ POST /data-quality/funds/{fund_id}/rules
 - `GET /data-quality/funds/{fund_id}` 返回 `research_quality`、`settlement_eligibility` 和原因。
 
 `RiskService` / `/orders/.../risk` 和 `/decisions/run` 使用同一持久化 DataQualityGate 结果，避免客户端伪造 GREEN。
+
+`seed_demo.py` 会为演示基金创建数据源、规则快照和 confirmed NAV；它不能替代真实基金的生产摄入流程。升级已有数据库后，如果历史基金尚未接入规则数据源，出现 RED 是预期 fail-closed 行为，不应通过硬编码 GREEN 绕过。
 
 ## Ruff / CI
 
@@ -175,6 +222,8 @@ Liveness 不执行昂贵业务查询；readiness 用于阻止未迁移/数据库
 - 服务实例反复重启
 - PostgreSQL unhealthy
 - AI 429 / denied usage 异常抬升
+- `ai_usage_ledger_write_failed` / `model_call_log_write_failed`
+- `provider_usage_missing_or_invalid` 持续出现
 - DataQuality RED 数量突增或官方数据源超过 SLA
 - 人工凭证即将过期/已吊销后继续使用
 
