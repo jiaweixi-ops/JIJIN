@@ -15,8 +15,6 @@ class Settings(BaseSettings):
     internal_api_token: str = ""
     live_trading_enabled: bool = False
 
-    # Human API credentials. New credentials are HMAC-SHA256 hashed with this
-    # server-side pepper; the plaintext token is shown exactly once at issue/rotation.
     api_credential_pepper: str = ""
     api_credential_default_ttl_days: int = 90
     api_credential_max_ttl_days: int = 365
@@ -31,8 +29,6 @@ class Settings(BaseSettings):
     kimi_base_url: str = "https://api.moonshot.cn/v1"
     kimi_model: str = ""
 
-    # AI budget controls. Cost rates are in AI_COST_CURRENCY per 1M tokens.
-    # A zero price means "unknown price"; call-count/size quotas still apply.
     ai_cost_currency: str = "CNY"
     ai_max_source_chars: int = 100_000
     ai_max_request_chars: int = 120_000
@@ -62,13 +58,17 @@ class Settings(BaseSettings):
     research_pipeline_batch_size: int = 5
     research_pipeline_max_attempts: int = 5
 
-    # V1.3 Phase 3: explicit, allowlisted external research collection.
     research_collection_timeout_seconds: float = 15.0
     research_collection_max_bytes: int = 2_000_000
     research_collection_max_redirects: int = 3
     research_collection_max_items_per_source: int = 20
     research_collection_batch_size: int = 20
     research_collection_allow_http: bool = False
+
+    # V1.3 Phase 4: collapse automatically collected items into one fund/day dossier.
+    research_dossier_lookback_hours: int = 72
+    research_dossier_max_materials: int = 12
+    research_dossier_max_chars: int = 80_000
 
     risk_profile_valid_days: int = 365
     nav_red_after_hours: int = 72
@@ -132,6 +132,14 @@ class Settings(BaseSettings):
             raise RuntimeError("RESEARCH_COLLECTION_MAX_ITEMS_PER_SOURCE must be >= 1")
         if self.research_collection_batch_size < 1:
             raise RuntimeError("RESEARCH_COLLECTION_BATCH_SIZE must be >= 1")
+        if self.research_dossier_lookback_hours < 1:
+            raise RuntimeError("RESEARCH_DOSSIER_LOOKBACK_HOURS must be >= 1")
+        if not 1 <= self.research_dossier_max_materials <= 20:
+            raise RuntimeError("RESEARCH_DOSSIER_MAX_MATERIALS must be between 1 and 20")
+        if not 1 <= self.research_dossier_max_chars <= self.ai_max_source_chars:
+            raise RuntimeError(
+                "RESEARCH_DOSSIER_MAX_CHARS must be positive and <= AI_MAX_SOURCE_CHARS"
+            )
         if self.feishu_enabled:
             missing = [
                 name

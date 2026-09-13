@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
+from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -71,6 +72,37 @@ class ResearchCollectionRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class ResearchDossier(Base):
+    """One account/fund research cycle assembled from multiple collected documents."""
+
+    __tablename__ = "research_dossier"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "fund_id",
+            "business_date",
+            name="uq_research_dossier_account_fund_day",
+        ),
+        Index("ix_research_dossier_status_date", "status", "business_date"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    account_id: Mapped[str] = mapped_column(ForeignKey("account.id"), index=True, nullable=False)
+    fund_id: Mapped[str] = mapped_column(ForeignKey("fund.id"), index=True, nullable=False)
+    business_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="ASSEMBLED")
+    research_item_id: Mapped[str] = mapped_column(ForeignKey("research_inbox.id"), index=True, nullable=False)
+    selected_document_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    suppressed_document_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    raw_research_item_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    source_names: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    material_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_chars: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class ResearchCollectedDocument(Base):
     """Normalized external document and its handoff to ResearchInbox."""
 
@@ -79,6 +111,7 @@ class ResearchCollectedDocument(Base):
         UniqueConstraint("source_id", "fingerprint", name="uq_research_collected_source_fingerprint"),
         Index("ix_research_collected_source_observed", "source_id", "observed_at"),
         Index("ix_research_collected_status_created", "status", "created_at"),
+        Index("ix_research_collected_dossier_status", "dossier_id", "status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
@@ -86,6 +119,7 @@ class ResearchCollectedDocument(Base):
         ForeignKey("research_collection_source.id"), index=True, nullable=False
     )
     research_item_id: Mapped[str | None] = mapped_column(ForeignKey("research_inbox.id"), index=True)
+    dossier_id: Mapped[str | None] = mapped_column(ForeignKey("research_dossier.id"), index=True)
     external_id: Mapped[str] = mapped_column(String(512), nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)

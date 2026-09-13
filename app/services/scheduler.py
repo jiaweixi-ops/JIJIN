@@ -8,6 +8,7 @@ from app.services.calendar import TradingCalendarService
 from app.services.operational_orchestrator import OperationalOrchestrator
 from app.services.order_service import OrderService
 from app.services.research_collection import ResearchCollectionService
+from app.services.research_dossier import ResearchDossierService
 from app.services.research_pipeline import ResearchPipelineService
 from app.services.simulation_broker import SimulationBroker
 
@@ -50,6 +51,19 @@ def _research_collection() -> None:
         except Exception:
             db.rollback()
             log.exception("research collection scheduler wrapper failed")
+
+
+def _research_dossiers() -> None:
+    settings = get_settings()
+    with SessionLocal() as db:
+        try:
+            summary = ResearchDossierService(db, settings).assemble_pending()
+            log.info("research dossier batch finished summary=%s", summary)
+        except Exception:
+            db.rollback()
+            # The AI pipeline excludes raw collected inbox items, so dossier failure
+            # fails closed instead of producing one candidate per article.
+            log.exception("research dossier scheduler wrapper failed")
 
 
 def _research_pipeline() -> None:
@@ -112,10 +126,6 @@ def build_scheduler():
         "misfire_grace_time": 600,
     }
 
-    # Two collection passes give the morning brief/research inbox a fresh baseline
-    # and refresh trusted feeds immediately before the 13:15 AI research pipeline.
-    # Only explicitly registered sources are fetched; arbitrary URLs are never
-    # accepted by the scheduler.
     scheduler.add_job(
         _research_collection,
         CronTrigger(day_of_week="mon-fri", hour=8, minute=15),
@@ -134,9 +144,15 @@ def build_scheduler():
         id="research_collection_predecision",
         **common,
     )
-    # Trusted inbox material is converted into auditable SUGGESTED candidates
-    # before the 13:30 early-cutoff and 14:00 normal risk windows. The research
-    # pipeline never approves or submits an order and skips closed CN market days.
+    # Consolidate the morning + pre-decision feed documents into at most one
+    # account/fund dossier before models run. Raw collected inbox rows are never
+    # eligible for direct AI processing.
+    scheduler.add_job(
+        _research_dossiers,
+        CronTrigger(day_of_week="mon-fri", hour=13, minute=0),
+        id="research_dossiers",
+        **common,
+    )
     scheduler.add_job(
         _research_pipeline,
         CronTrigger(day_of_week="mon-fri", hour=13, minute=15),
@@ -162,9 +178,6 @@ def build_scheduler():
         **common,
     )
 
-    # Settlement is idempotent: each cash-flow row is claimed by status before
-    # account balances are moved. Polling keeps platform-specific T+N arrival
-    # times from being tied to a single hard-coded daily clock.
     scheduler.add_job(
         _settle_due_cash,
         CronTrigger(day_of_week="mon-fri", hour="8-22", minute="*/15"),

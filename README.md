@@ -9,7 +9,10 @@
 ```text
 显式注册的可信 RSS / Atom / JSON Feed
   -> 安全采集 + Collection Run / Document 持久化
-  -> Research Inbox（payload hash + 幂等）
+  -> 13:00 Multi-source Research Dossier
+       - 同基金/同账户/同业务日合并
+       - 内容去重 + 来源多样性优先 + 字符/条数预算
+  -> Consolidated Research Inbox
   -> Kimi 研究
   -> Qwen 结构化 / Evidence 持久化
   -> DeepSeek CIO
@@ -22,7 +25,7 @@
   -> confirmed NAV / 在途结算 / 账本 / 对账
 ```
 
-自动化硬边界不变：**采集器只负责把显式注册来源转换成 Research Inbox；研究流水线最多生成 `SUGGESTED`；日内编排最多推进到 `PENDING_CONFIRM`。系统不会自动代表用户批准订单。** DeepSeek CIO 不可用时返回 WAIT/BLOCKED，不由 Kimi 或 Qwen 顶替。
+自动化硬边界不变：**采集器只获取显式注册来源；自动采集的单篇原始 Inbox 不能直接进入 AI，必须先进入 Dossier；研究流水线最多生成 `SUGGESTED`；日内编排最多推进到 `PENDING_CONFIRM`。系统不会自动代表用户批准订单。** DeepSeek CIO 不可用时返回 WAIT/BLOCKED，不由 Kimi 或 Qwen 顶替。
 
 ## V1.3 已接通
 
@@ -31,11 +34,16 @@
 - `OperationalRun` 以 `(job_name, business_date)` 作为持久化幂等边界，支持失败重试和 stale RUNNING 接管。
 - Phase 3 外部采集只访问**显式注册**的 RSS/Atom/JSON Feed；HTTPS 默认强制，拒绝 embedded credentials、localhost、literal private IP，并在实际请求与每次 redirect 前做 public-DNS 校验。
 - Collection Source / Run / Document 全部持久化；相同 `external_id + content_sha256` 不重复进入 Research Inbox。
+- Phase 4 以 `(account_id, fund_id, business_date)` 形成唯一 `ResearchDossier`，防止同一基金一天因多篇自动采集材料生成多条相互竞争的候选路径。
+- Dossier 对 syndicated identical content 做 `content_sha256` 去重；选材优先覆盖不同来源，再按时间补足，受 `MAX_MATERIALS` 与 `MAX_CHARS` 双预算约束。
+- 超出 72h 默认 lookback 的自动材料标记为 `STALE`；当日 Dossier 已存在后新到材料标记 `DEFERRED`，可在后续业务日重新进入聚合。
+- 被 Dossier 吸收的原始 Research Inbox 标记 `SUPERSEDED`；即使手工调用 process，也会被流水线拒绝直接处理。
 - ETag / Last-Modified 支持条件请求；HTTP 304 记成功但不产生新材料。
 - 08:15：第一轮可信来源采集。
 - 08:45：模拟账户盘前简报、DataQuality 汇总、过期候选清理。
 - 12:45：第二轮可信来源采集。
-- 13:15：处理 Research Inbox，将材料转换为审计可追踪的 `SUGGESTED` 候选。
+- **13:00：按账户/基金汇总多来源 Dossier。**
+- 13:15：仅处理普通人工 Inbox 与 Consolidated Dossier Inbox，转换为审计可追踪的 `SUGGESTED` 候选。
 - 13:30：提前截止基金优先进入确定性风控。
 - 14:00：其余候选进入确定性风控；通过后停在 `PENDING_CONFIRM` 并发送交易卡。
 - 20:30：月末交易日探测与模拟月报；未完成结算时保持 PROVISIONAL。
@@ -62,13 +70,21 @@ GET  /decisions/quota
 V1.3 外部研究采集：
 
 ```text
-POST  /research/collection/sources                  # system / ADMIN
+POST  /research/collection/sources                     # system / ADMIN
 GET   /research/collection/sources
-PATCH /research/collection/sources/{source_id}      # system / ADMIN
+PATCH /research/collection/sources/{source_id}         # system / ADMIN
 POST  /research/collection/sources/{source_id}/collect # system / ADMIN
 GET   /research/collection/runs
 GET   /research/collection/documents
 GET   /research/collection/documents/{document_id}
+```
+
+V1.3 多来源 Dossier：
+
+```text
+GET  /research/dossiers
+GET  /research/dossiers/{dossier_id}
+POST /research/dossiers/assemble                       # system / ADMIN
 ```
 
 V1.3 日常运行：
@@ -84,7 +100,7 @@ GET  /research/inbox/{item_id}/evidence
 POST /research/inbox/{item_id}/process
 ```
 
-所有 `/research/*` 均要求内部认证。Research Inbox 写操作允许 system、EDITOR、ADMIN；外部 collection source 的新增/修改/手工抓取只允许 system 或 ADMIN。
+所有 `/research/*` 均要求内部认证。Research Inbox 写操作允许 system、EDITOR、ADMIN；collection source 管理、手工抓取与 dossier 手工 assemble 只允许 system 或 ADMIN。
 
 ## 可信研究来源边界
 
@@ -108,6 +124,23 @@ response body/content-type/redirect count are bounded
 
 详细规则见 `docs/V1.3_RESEARCH_COLLECTION.md`。
 
+## Multi-source Research Dossier
+
+自动采集材料与人工 Research Inbox 的语义不同。人工主动提交的 Inbox 可以直接进入 13:15 流水线；自动采集产生的单篇原始 Inbox 只是**审计留痕载体**，不允许直接跑模型。
+
+13:00 Dossier 阶段对每个 `(account_id, fund_id)`：
+
+1. 只考虑默认 72 小时 lookback 内、尚未归档的自动采集文档。
+2. 先按 `content_sha256` 去掉不同 feed 转载的相同正文。
+3. 先取每个来源最新一条，保证来源覆盖，再按新鲜度填剩余槽位。
+4. 默认最多 12 条、总正文 80,000 字符，且不会突破全局 `AI_MAX_SOURCE_CHARS`。
+5. 生成一天唯一的 Consolidated Research Inbox。
+6. 原单篇 Inbox 变为 `SUPERSEDED`，防止重复 AI 调用和重复候选。
+
+如果 13:00 后又抓到新材料，当日已有 Dossier 不会被静默改写；新材料进入 `DEFERRED`，后续业务日按 lookback 重新考虑。这样 DecisionPlan 的输入集合在同一业务日是可审计、可重放的固定快照。
+
+详细规则见 `docs/V1.3_RESEARCH_DOSSIERS.md`。
+
 ## Research Inbox 的幂等边界
 
 Inbox 幂等边界：
@@ -116,7 +149,7 @@ Inbox 幂等边界：
 (account_id, idempotency_key)
 ```
 
-同时保存整个规范化请求的 `payload_hash`。同 key 同 payload 返回原记录；同 key 不同 payload 拒绝，防止“重试”静默改写历史。采集器生成的 idempotency key 由 document fingerprint 确定，所以重复抓取同一内容不会生成重复候选。
+同时保存整个规范化请求的 `payload_hash`。同 key 同 payload 返回原记录；同 key 不同 payload 拒绝，防止“重试”静默改写历史。采集器生成的 idempotency key 由 document fingerprint 确定；Dossier 的 idempotency key 由账户、基金、业务日和选中文档 fingerprint 集合确定。
 
 详细状态、恢复和来源校验规则见 `docs/V1.3_RESEARCH_PIPELINE.md`。
 
@@ -157,6 +190,7 @@ V1.3 日配额仍是个人工具场景的 best-effort “查累计 -> 判断 -> 
 08:15  research_collection_morning
 08:45  morning_brief
 12:45  research_collection_predecision
+13:00  research_dossiers
 13:15  research_pipeline
 13:30  early_cutoff
 14:00  decision_window
@@ -164,7 +198,7 @@ V1.3 日配额仍是个人工具场景的 best-effort “查累计 -> 判断 -> 
 08:00-22:00 / 15min  settle_due_cash
 ```
 
-APScheduler 只负责触发；交易日、业务日、幂等和订单边界都在业务层重新校验。外部采集器只抓已注册来源，不接受 scheduler 参数中的任意 URL。
+APScheduler 只负责触发；交易日、业务日、幂等和订单边界都在业务层重新校验。Dossier 失败时，13:15 流水线仍会排除原始自动采集 Inbox，因此失败方向是“少做一次研究”，而不是“同一基金按多篇文章各做一次决策”。
 
 Research 配置：
 
@@ -178,6 +212,9 @@ RESEARCH_COLLECTION_MAX_REDIRECTS=3
 RESEARCH_COLLECTION_MAX_ITEMS_PER_SOURCE=20
 RESEARCH_COLLECTION_BATCH_SIZE=20
 RESEARCH_COLLECTION_ALLOW_HTTP=false
+RESEARCH_DOSSIER_LOOKBACK_HOURS=72
+RESEARCH_DOSSIER_MAX_MATERIALS=12
+RESEARCH_DOSSIER_MAX_CHARS=80000
 ```
 
 ## 数据库迁移
@@ -190,6 +227,7 @@ Schema 只通过 Alembic 演进：
 20260913_01  OperationalRun
 20260913_02  Research Inbox + Research Evidence
 20260913_03  Research Collection Source + Run + Document
+20260913_04  Research Dossier + document dossier binding
 ```
 
 启动应用前：
@@ -245,4 +283,5 @@ API 默认只绑定 `127.0.0.1`；PostgreSQL 不发布宿主机端口；容器�
 - `docs/V1.3_OPERATIONAL_SIMULATION.md`：Phase 1 每日运行编排。
 - `docs/V1.3_RESEARCH_PIPELINE.md`：Phase 2 可信研究材料到候选单。
 - `docs/V1.3_RESEARCH_COLLECTION.md`：Phase 3 可信外部 feed 采集与网络安全边界。
+- `docs/V1.3_RESEARCH_DOSSIERS.md`：Phase 4 多来源基金/业务日研究档案与候选降噪。
 - `docs/DB_MIGRATIONS_V1.2.2.md`：数据库迁移运行手册（迁移命令继续适用于 V1.3）。

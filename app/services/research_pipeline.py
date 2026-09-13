@@ -5,10 +5,11 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.collection_models import ResearchCollectedDocument
 from app.config import Settings
 from app.enums import AccountType, DataQualityLevel, OrderSide
 from app.models import Account, AuditLog, Fund
@@ -21,8 +22,8 @@ from app.services.decision_engine import DecisionEngine
 from app.services.order_service import OrderService
 from app.services.research_metrics import ResearchMetricsService
 
-PIPELINE_VERSION = "v1.3-phase2"
-TERMINAL_RESEARCH_STATUSES = {"PROCESSED"}
+PIPELINE_VERSION = "v1.3-phase4"
+TERMINAL_RESEARCH_STATUSES = {"PROCESSED", "SUPERSEDED"}
 AUTO_RETRY_STATUSES = {"NEW", "FAILED"}
 SPECIAL_RETRY_ABSTAIN_REASONS = {"DATA_QUALITY_RED", "CIO_UNAVAILABLE"}
 
@@ -239,6 +240,13 @@ class ResearchPipelineService:
         if claimed is None:
             raise RuntimeError("research item disappeared after claim")
         return claimed
+
+    def _is_raw_collected_item(self, item_id: str) -> bool:
+        return self.db.scalar(
+            select(ResearchCollectedDocument.id)
+            .where(ResearchCollectedDocument.research_item_id == item_id)
+            .limit(1)
+        ) is not None
 
     @staticmethod
     def _material_prompt(item: ResearchInboxItem) -> str:
@@ -491,6 +499,10 @@ class ResearchPipelineService:
         item = self.db.get(ResearchInboxItem, item_id)
         if item is None:
             raise KeyError(item_id)
+        if self._is_raw_collected_item(item.id):
+            raise ResearchProcessingConflict(
+                "collected research item must be consolidated into a dossier before AI processing"
+            )
         if item.status in TERMINAL_RESEARCH_STATUSES:
             return item
         item = self._claim(item, now_utc=now_utc, manual=manual)
@@ -635,11 +647,15 @@ class ResearchPipelineService:
     ) -> dict[str, Any]:
         now_utc = self._as_utc(now or datetime.now(timezone.utc))
         batch_size = limit or self.settings.research_pipeline_batch_size
+        raw_collected = exists().where(
+            ResearchCollectedDocument.research_item_id == ResearchInboxItem.id
+        )
         items = self.db.scalars(
             select(ResearchInboxItem)
             .where(
                 ResearchInboxItem.status.in_(list(AUTO_RETRY_STATUSES)),
                 ResearchInboxItem.attempt < self.settings.research_pipeline_max_attempts,
+                ~raw_collected,
             )
             .order_by(ResearchInboxItem.created_at, ResearchInboxItem.id)
             .limit(batch_size)
