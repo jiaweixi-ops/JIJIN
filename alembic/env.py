@@ -8,6 +8,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app import (  # noqa: F401
     collection_models,
+    fund_data_models,
     hardening_models,
     models,
     operational_models,

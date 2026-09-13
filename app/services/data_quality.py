@@ -20,6 +20,7 @@ class QualityInput:
     fee_version_changed_unresolved: bool = False
     trading_status_known: bool = True
     source_conflict_critical: bool = False
+    nav_conflict_critical: bool = False
     missing_critical_fields: list[str] = field(default_factory=list)
     announcement_fetch_ok: bool = True
     rule_observed_at: datetime | None = None
@@ -41,6 +42,7 @@ class QualityResult:
 
 class DataQualityGate:
     RULE_FIELD = "fund_rule_snapshot"
+    NAV_CONFLICT_FIELD = "nav_conflict"
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -76,6 +78,9 @@ class DataQualityGate:
         if not item.nav_confirmed:
             yellow = True
             reasons.append("净值尚未确认，仅可用于研究估算")
+        if item.nav_conflict_critical:
+            red = True
+            reasons.append("已确认净值存在未清除的权威来源冲突")
 
         if not item.fee_version or item.fee_version_changed_unresolved:
             red = True
@@ -126,16 +131,19 @@ class DataQualityGate:
         )
         return QualityResult(research, settlement_eligible, reasons)
 
-    def _latest_rule_snapshot(self, db: Session, fund_id: str) -> DataQuality | None:
+    def _latest_quality(self, db: Session, fund_id: str, field_name: str) -> DataQuality | None:
         return db.scalar(
             select(DataQuality)
             .where(
                 DataQuality.entity_type == "fund",
                 DataQuality.entity_id == fund_id,
-                DataQuality.field_name == self.RULE_FIELD,
+                DataQuality.field_name == field_name,
             )
             .order_by(DataQuality.observed_at.desc(), DataQuality.created_at.desc())
         )
+
+    def _latest_rule_snapshot(self, db: Session, fund_id: str) -> DataQuality | None:
+        return self._latest_quality(db, fund_id, self.RULE_FIELD)
 
     def evaluate_fund(
         self,
@@ -150,6 +158,7 @@ class DataQualityGate:
             .order_by(NavConfirm.nav_date.desc(), NavConfirm.observed_at.desc())
         )
         snapshot = self._latest_rule_snapshot(db, fund.id)
+        nav_conflict = self._latest_quality(db, fund.id, self.NAV_CONFLICT_FIELD)
         details = snapshot.details if snapshot and snapshot.details else {}
         source = None
         if snapshot is not None:
@@ -171,6 +180,9 @@ class DataQualityGate:
                 ),
                 trading_status_known=trading_status_known,
                 source_conflict_critical=bool(details.get("source_conflict_critical", False)),
+                nav_conflict_critical=bool(
+                    nav_conflict and nav_conflict.level == DataQualityLevel.RED
+                ),
                 missing_critical_fields=sorted(set(missing)),
                 announcement_fetch_ok=bool(details.get("announcement_fetch_ok", False))
                 if snapshot

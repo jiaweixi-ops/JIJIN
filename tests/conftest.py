@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import (  # noqa: F401
     collection_models,
+    fund_data_models,
     hardening_models,
     models,
     operational_models,

@@ -11,6 +11,7 @@ from app.models import Account
 from app.operational_models import OperationalAlert
 from app.services.calendar import TradingCalendarService
 from app.services.feishu import FeishuClient
+from app.services.fund_data_sync import FundDataSyncService
 from app.services.ledger import MissingConfirmedNav
 from app.services.operational_alerts import OperationalAlertService, operational_alert_card
 from app.services.operational_orchestrator import OperationalOrchestrator
@@ -44,6 +45,18 @@ def _run_operational_job(job_name: str) -> None:
         except Exception:
             db.rollback()
             log.exception("operational scheduler wrapper failed job=%s", job_name)
+
+
+def _fund_data_sync() -> None:
+    settings = get_settings()
+    with SessionLocal() as db:
+        try:
+            summary = FundDataSyncService(db, settings).sync_enabled()
+            logger = log.warning if summary["failed"] or summary["partial"] else log.info
+            logger("fund-data sync batch finished summary=%s", summary)
+        except Exception:
+            db.rollback()
+            log.exception("fund-data sync scheduler wrapper failed")
 
 
 def _morning_brief() -> None:
@@ -213,6 +226,22 @@ def build_scheduler():
         "misfire_grace_time": 600,
     }
 
+    # Trading rules and fund profiles arrive before research/risk windows. NAV
+    # updates continue after close; QDII/FOF may still legitimately settle later.
+    for job_id, hour, minute in [
+        ("fund_data_premarket", 7, 45),
+        ("fund_data_predecision", 13, 20),
+        ("fund_data_postclose", 18, 0),
+        ("fund_data_presnapshot", 22, 15),
+        ("fund_data_late", 23, 15),
+    ]:
+        scheduler.add_job(
+            _fund_data_sync,
+            CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute),
+            id=job_id,
+            **common,
+        )
+
     scheduler.add_job(
         _research_collection,
         CronTrigger(day_of_week="mon-fri", hour=8, minute=15),
@@ -261,12 +290,18 @@ def build_scheduler():
         id="month_end_probe",
         **common,
     )
-    # Exact confirmed NAV only. If any held fund is still pending (for example
-    # QDII/FOF), the account snapshot is skipped rather than fabricating P&L.
     scheduler.add_job(
         _portfolio_snapshot,
         CronTrigger(day_of_week="mon-fri", hour=22, minute=30),
         id="portfolio_snapshot",
+        **common,
+    )
+    # One late retry can fill a snapshot if an exact NAV arrived between 22:30
+    # and the 23:15 data sync. ReportService upserts the date idempotently.
+    scheduler.add_job(
+        _portfolio_snapshot,
+        CronTrigger(day_of_week="mon-fri", hour=23, minute=30),
+        id="portfolio_snapshot_retry",
         **common,
     )
 
@@ -279,9 +314,6 @@ def build_scheduler():
         coalesce=True,
         misfire_grace_time=600,
     )
-    # Alert detection also runs on weekends so infrastructure/accounting defects
-    # do not stay hidden until the next trading day. Trading-day-specific signals
-    # (for example formal snapshot pending) still check the business calendar.
     scheduler.add_job(
         _operational_alerts,
         CronTrigger(day_of_week="mon-sun", hour="8-23", minute="0,30"),
