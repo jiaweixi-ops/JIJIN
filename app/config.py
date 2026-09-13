@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     default_cutoff_buffer_minutes: int = 10
     order_stale_minutes: int = 60
     operational_run_stale_minutes: int = 30
+    research_processing_stale_minutes: int = 30
+    research_pipeline_batch_size: int = 5
+    research_pipeline_max_attempts: int = 5
     risk_profile_valid_days: int = 365
     nav_red_after_hours: int = 72
     nav_yellow_after_hours: int = 36
@@ -104,6 +107,12 @@ class Settings(BaseSettings):
             raise RuntimeError("DATA_SOURCE_CONFLICT_WINDOW_MINUTES must be >= 0")
         if self.operational_run_stale_minutes < 1:
             raise RuntimeError("OPERATIONAL_RUN_STALE_MINUTES must be >= 1")
+        if self.research_processing_stale_minutes < 1:
+            raise RuntimeError("RESEARCH_PROCESSING_STALE_MINUTES must be >= 1")
+        if self.research_pipeline_batch_size < 1:
+            raise RuntimeError("RESEARCH_PIPELINE_BATCH_SIZE must be >= 1")
+        if self.research_pipeline_max_attempts < 1:
+            raise RuntimeError("RESEARCH_PIPELINE_MAX_ATTEMPTS must be >= 1")
         if self.feishu_enabled:
             missing = [
                 name
