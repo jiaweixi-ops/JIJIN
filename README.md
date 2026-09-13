@@ -7,8 +7,9 @@
 ## V1.3 当前闭环
 
 ```text
-可信研究材料
-  -> Research Inbox（持久化 + payload hash + 幂等）
+显式注册的可信 RSS / Atom / JSON Feed
+  -> 安全采集 + Collection Run / Document 持久化
+  -> Research Inbox（payload hash + 幂等）
   -> Kimi 研究
   -> Qwen 结构化 / Evidence 持久化
   -> DeepSeek CIO
@@ -21,21 +22,26 @@
   -> confirmed NAV / 在途结算 / 账本 / 对账
 ```
 
-自动化的硬边界不变：**研究流水线最多生成 `SUGGESTED`；日内编排最多推进到 `PENDING_CONFIRM`。系统不会自动代表用户批准订单。** DeepSeek CIO 不可用时返回 WAIT/BLOCKED，不由 Kimi 或 Qwen 顶替。
+自动化硬边界不变：**采集器只负责把显式注册来源转换成 Research Inbox；研究流水线最多生成 `SUGGESTED`；日内编排最多推进到 `PENDING_CONFIRM`。系统不会自动代表用户批准订单。** DeepSeek CIO 不可用时返回 WAIT/BLOCKED，不由 Kimi 或 Qwen 顶替。
 
 ## V1.3 已接通
 
-- V1.2.2 全部安全与账务基线：订单状态机、版本控制、幂等、DataQuality、NAV 估值日、lot/fee、在途资金、对账、凭证生命周期、AI 配额、Feishu 防重放与 callback 幂等、Alembic、容器加固和基础监控。
+- V1.2.2 安全与账务基线：订单状态机、版本控制、幂等、DataQuality、NAV 估值日、lot/fee、在途资金、对账、凭证生命周期、AI 配额、Feishu 防重放与 callback 幂等、Alembic、容器加固和基础监控。
 - `/portfolio/*` 等金融数据 API 均要求内部认证；`/health`、`/ready` 和经过飞书签名验证的事件入口按设计例外。
 - `OperationalRun` 以 `(job_name, business_date)` 作为持久化幂等边界，支持失败重试和 stale RUNNING 接管。
+- Phase 3 外部采集只访问**显式注册**的 RSS/Atom/JSON Feed；HTTPS 默认强制，拒绝 embedded credentials、localhost、literal private IP，并在实际请求与每次 redirect 前做 public-DNS 校验。
+- Collection Source / Run / Document 全部持久化；相同 `external_id + content_sha256` 不重复进入 Research Inbox。
+- ETag / Last-Modified 支持条件请求；HTTP 304 记成功但不产生新材料。
+- 08:15：第一轮可信来源采集。
 - 08:45：模拟账户盘前简报、DataQuality 汇总、过期候选清理。
-- 13:15：处理可信 Research Inbox，将研究材料转换为审计可追踪的 `SUGGESTED` 候选。
+- 12:45：第二轮可信来源采集。
+- 13:15：处理 Research Inbox，将材料转换为审计可追踪的 `SUGGESTED` 候选。
 - 13:30：提前截止基金优先进入确定性风控。
 - 14:00：其余候选进入确定性风控；通过后停在 `PENDING_CONFIRM` 并发送交易卡。
 - 20:30：月末交易日探测与模拟月报；未完成结算时保持 PROVISIONAL。
-- Research Inbox 分阶段持久化 `research_packet`、`structured_packet`、`decision_plan` 与 `candidate_order_ids`，暂时失败后可恢复，不必无意义重复所有模型调用。
-- 结构化 evidence 必须绑定到已摄入的 `source_name/source_url`；模型引用未进入 Inbox 的来源会被拒绝。
-- DataQuality RED 在研究模型调用前 fail-closed；不会消耗 Kimi/Qwen/DeepSeek 调用后再发现不能交易。
+- Research Inbox 分阶段持久化 `research_packet`、`structured_packet`、`decision_plan` 与 `candidate_order_ids`，暂时失败后可恢复。
+- 结构化 evidence 必须绑定到已摄入的 `source_name/source_url`；模型引用 Inbox 之外的来源会被拒绝。
+- DataQuality RED 在研究模型调用前 fail-closed。
 - DecisionPlan 到订单映射只允许当前 inbox 对应基金的 BUY/SELL，一条 fund-scoped research item 最多产生一个候选，CONVERT 继续拒绝。
 
 ## 关键 API
@@ -53,6 +59,18 @@ GET  /data-quality/funds/{fund_id}
 GET  /decisions/quota
 ```
 
+V1.3 外部研究采集：
+
+```text
+POST  /research/collection/sources                  # system / ADMIN
+GET   /research/collection/sources
+PATCH /research/collection/sources/{source_id}      # system / ADMIN
+POST  /research/collection/sources/{source_id}/collect # system / ADMIN
+GET   /research/collection/runs
+GET   /research/collection/documents
+GET   /research/collection/documents/{document_id}
+```
+
 V1.3 日常运行：
 
 ```text
@@ -66,19 +84,39 @@ GET  /research/inbox/{item_id}/evidence
 POST /research/inbox/{item_id}/process
 ```
 
-所有 `/research/*` 均要求内部认证；研究写操作仅 system、EDITOR 或 ADMIN。Research 列表不返回完整材料正文，详情才返回。
+所有 `/research/*` 均要求内部认证。Research Inbox 写操作允许 system、EDITOR、ADMIN；外部 collection source 的新增/修改/手工抓取只允许 system 或 ADMIN。
 
-## Research Inbox 的可信边界
+## 可信研究来源边界
 
-`POST /research/inbox` 必须由受认证主体主动摄入材料。当前 Phase 2 **没有自动全网抓取器**。每份材料记录来源、时间戳、正文和 `content_sha256`。
+Phase 3 **不是开放网络爬虫**。调度器不会接受临时 URL，也不会允许模型自己添加来源。只有先通过 `/research/collection/sources` 注册的 feed 才会被自动访问。
 
-Inbox 幂等边界为：
+默认网络规则：
+
+```text
+HTTPS only
+no URL username/password
+no localhost / *.localhost
+no literal private/loopback/link-local/reserved IP
+DNS must resolve only to public/global addresses
+redirect target is revalidated
+response body/content-type/redirect count are bounded
+```
+
+应用层 DNS 预检查并不能理论上完全消除 DNS rebinding；生产容器仍应配置网络 egress policy，禁止访问 RFC1918、云 metadata、宿主机和内部控制面。
+
+`ResearchCollectionSource` 负责研究材料来源；`DataSource` / `DataQualityGate` 负责基金交易规则/NAV/公告健康度。两者职责分离，不能因为 feed 抓取成功就自动认为基金 DataQuality 是 GREEN。
+
+详细规则见 `docs/V1.3_RESEARCH_COLLECTION.md`。
+
+## Research Inbox 的幂等边界
+
+Inbox 幂等边界：
 
 ```text
 (account_id, idempotency_key)
 ```
 
-同时保存整个规范化请求的 `payload_hash`。同 key 同 payload 返回原记录；同 key 不同 payload 拒绝，防止“重试”变成静默改写历史。
+同时保存整个规范化请求的 `payload_hash`。同 key 同 payload 返回原记录；同 key 不同 payload 拒绝，防止“重试”静默改写历史。采集器生成的 idempotency key 由 document fingerprint 确定，所以重复抓取同一内容不会生成重复候选。
 
 详细状态、恢复和来源校验规则见 `docs/V1.3_RESEARCH_PIPELINE.md`。
 
@@ -90,7 +128,7 @@ Inbox 幂等边界为：
 - YELLOW：可以做有限研究/估算，但不等于可结算。
 - 正式模拟成交只使用与订单 `valuation_date` 精确匹配的 confirmed NAV。
 
-每只参与自动研究/候选的基金都必须先注册启用的数据源，并摄入基金规则快照；否则 RED 是预期的 fail-closed 行为，不是系统故障。
+每只参与自动研究/候选的基金都必须先注册启用的数据源，并摄入基金规则快照；否则 RED 是预期的 fail-closed 行为。
 
 ## AI 配额与成本
 
@@ -107,16 +145,18 @@ QWEN_*_COST_PER_MILLION
 KIMI_*_COST_PER_MILLION
 ```
 
-价格为 0 表示未知价格；字符/token/call-count 限制仍生效。配置价格后，调用前使用偏保守的 token 上界：ASCII/窄字符按 1 token/字符，CJK/东亚宽字符按 2 token/字符，并预留最大输出 token。provider 不返回 usage 时，调用后也使用保守上界记入 `estimated_cost`，不会把成本错误记为 0。
+价格为 0 表示未知价格；字符/token/call-count 限制仍生效。配置价格后，调用前使用偏保守 token 上界：ASCII/窄字符按 1 token/字符，CJK/东亚宽字符按 2 token/字符，并预留最大输出 token。provider 不返回 usage 时，调用后也使用保守上界记入 `estimated_cost`。
 
-V1.3 的日配额仍是个人工具场景的 best-effort “查累计 -> 判断 -> 调用 -> 记账”；多 worker 严格预算需要原子日预算预留行/行锁，当前不宣称解决了该竞态。
+V1.3 日配额仍是个人工具场景的 best-effort “查累计 -> 判断 -> 调用 -> 记账”；多 worker 严格预算需要原子日预算预留行/行锁。
 
 ## V1.3 调度
 
 默认 `Asia/Shanghai`：
 
 ```text
+08:15  research_collection_morning
 08:45  morning_brief
+12:45  research_collection_predecision
 13:15  research_pipeline
 13:30  early_cutoff
 14:00  decision_window
@@ -124,7 +164,7 @@ V1.3 的日配额仍是个人工具场景的 best-effort “查累计 -> 判断 
 08:00-22:00 / 15min  settle_due_cash
 ```
 
-APScheduler 只负责触发；交易日、业务日、幂等和订单边界都在业务层重新校验。
+APScheduler 只负责触发；交易日、业务日、幂等和订单边界都在业务层重新校验。外部采集器只抓已注册来源，不接受 scheduler 参数中的任意 URL。
 
 Research 配置：
 
@@ -132,6 +172,12 @@ Research 配置：
 RESEARCH_PROCESSING_STALE_MINUTES=30
 RESEARCH_PIPELINE_BATCH_SIZE=5
 RESEARCH_PIPELINE_MAX_ATTEMPTS=5
+RESEARCH_COLLECTION_TIMEOUT_SECONDS=15
+RESEARCH_COLLECTION_MAX_BYTES=2000000
+RESEARCH_COLLECTION_MAX_REDIRECTS=3
+RESEARCH_COLLECTION_MAX_ITEMS_PER_SOURCE=20
+RESEARCH_COLLECTION_BATCH_SIZE=20
+RESEARCH_COLLECTION_ALLOW_HTTP=false
 ```
 
 ## 数据库迁移
@@ -143,6 +189,7 @@ Schema 只通过 Alembic 演进：
 20260912_02  ApiCredential lifecycle + AI usage ledger
 20260913_01  OperationalRun
 20260913_02  Research Inbox + Research Evidence
+20260913_03  Research Collection Source + Run + Document
 ```
 
 启动应用前：
@@ -178,7 +225,7 @@ cp .env.compose.example .env
 docker compose up --build -d
 ```
 
-API 默认只绑定 `127.0.0.1`；PostgreSQL 不发布宿主机端口；容器以非 root 用户运行。远程访问请置于受控 TLS/VPN/反向代理之后。
+API 默认只绑定 `127.0.0.1`；PostgreSQL 不发布宿主机端口；容器以非 root 用户运行。远程访问请置于受控 TLS/VPN/反向代理之后。外部 research collection 最好再叠加容器/主机 egress 防火墙。
 
 ## 明确未支持
 
@@ -186,6 +233,8 @@ API 默认只绑定 `127.0.0.1`；PostgreSQL 不发布宿主机端口；容器�
 - 基金转换 CONVERT。
 - 自动替代人工批准。
 - DeepSeek CIO 故障时的其他 CIO fallback。
+- 通用网页爬虫、JavaScript 浏览器抓取、搜索引擎全网发现。
+- 模型自行新增/修改采集来源。
 - 自动全网抓取并无审查地直接进入交易研究流水线。
 - 独立“回测中心”。历史数据仅用于确定性指标、规则验证、事件复盘与异常演练。
 
@@ -195,4 +244,5 @@ API 默认只绑定 `127.0.0.1`；PostgreSQL 不发布宿主机端口；容器�
 - `docs/OPERATIONS_V1.2.2.md`：凭证、AI 配额、DataQuality、Docker/监控 hardening。
 - `docs/V1.3_OPERATIONAL_SIMULATION.md`：Phase 1 每日运行编排。
 - `docs/V1.3_RESEARCH_PIPELINE.md`：Phase 2 可信研究材料到候选单。
+- `docs/V1.3_RESEARCH_COLLECTION.md`：Phase 3 可信外部 feed 采集与网络安全边界。
 - `docs/DB_MIGRATIONS_V1.2.2.md`：数据库迁移运行手册（迁移命令继续适用于 V1.3）。
