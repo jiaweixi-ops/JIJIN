@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, inspect, text
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAD = "20260913_04"
+HEAD = "20260913_05"
 
 
 def _config(database_url: str) -> Config:
@@ -33,6 +33,7 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
         "feishu_callback",
         "ai_usage_ledger",
         "operational_run",
+        "operational_alert",
         "research_inbox",
         "research_evidence",
         "research_collection_source",
@@ -46,6 +47,17 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
     assert {"hash_version", "expires_at", "revoked_at", "rotated_from_id"} <= credential_columns
     operational_columns = {column["name"] for column in inspector.get_columns("operational_run")}
     assert {"job_name", "business_date", "status", "attempt", "summary"} <= operational_columns
+    alert_columns = {column["name"] for column in inspector.get_columns("operational_alert")}
+    assert {
+        "dedupe_key",
+        "alert_type",
+        "severity",
+        "state",
+        "occurrence_count",
+        "notified_at",
+        "acknowledged_by",
+        "resolved_at",
+    } <= alert_columns
     research_columns = {column["name"] for column in inspector.get_columns("research_inbox")}
     assert {
         "account_id",
@@ -124,6 +136,7 @@ def test_alembic_adopts_legacy_schema_and_backfills_callback_status(tmp_path):
         "orders",
         "ai_usage_ledger",
         "operational_run",
+        "operational_alert",
         "research_inbox",
         "research_evidence",
         "research_collection_source",
