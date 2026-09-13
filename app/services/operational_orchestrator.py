@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -11,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.domain.order_state import InvalidTransition, StaleOrderVersion
+from app.domain.order_state import EXPIRABLE_STATES, InvalidTransition, StaleOrderVersion
 from app.enums import AccountType, DataQualityLevel, OrderEventType, OrderSide, OrderStatus
 from app.models import Account, Fund, Order
 from app.operational_models import OperationalRun
@@ -45,10 +44,10 @@ SUPPORTED_JOBS = {
 
 
 class OperationalOrchestrator:
-    """Run the V1.3 daily simulation workflow without auto-approving trades.
+    """Run V1.3 daily simulation workflows without auto-approving trades.
 
-    The orchestrator intentionally stops at PENDING_CONFIRM. Human confirmation is
-    still mandatory, and SimulationBroker submission remains a separate action.
+    APScheduler is only a trigger. Business-date checks, idempotency, DataQuality,
+    risk and the human-confirmation boundary are enforced here.
     """
 
     def __init__(self, db: Session, settings: Settings):
@@ -76,22 +75,6 @@ class OperationalOrchestrator:
 
     def _business_date(self, now_utc: datetime) -> date:
         return now_utc.astimezone(self.tz).date()
-
-    @staticmethod
-    def _run_to_dict(run: OperationalRun) -> dict[str, Any]:
-        return {
-            "id": run.id,
-            "job_name": run.job_name,
-            "business_date": run.business_date.isoformat(),
-            "trigger": run.trigger,
-            "status": run.status,
-            "attempt": run.attempt,
-            "scheduled_for": run.scheduled_for.isoformat() if run.scheduled_for else None,
-            "started_at": run.started_at.isoformat(),
-            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-            "summary": run.summary or {},
-            "error": run.error,
-        }
 
     def _claim(
         self,
@@ -199,7 +182,7 @@ class OperationalOrchestrator:
         }
         try:
             status, summary = handlers[job_name](now_utc)
-            return self._finish(run, status, summary, self._now_utc())
+            return self._finish(run, status, summary, now_utc)
         except Exception as exc:
             self.db.rollback()
             log.exception("operational job failed job=%s run_id=%s", job_name, run.id)
@@ -207,14 +190,19 @@ class OperationalOrchestrator:
                 run,
                 "FAILED",
                 {"exception_type": type(exc).__name__},
-                self._now_utc(),
+                now_utc,
                 error=str(exc),
             )
 
     def _is_open_day(self, day: date) -> bool:
         return self.calendar.is_open(day, "CN")
 
-    def _notify(self, title: str, markdown: str, template: str = "blue") -> tuple[bool, str]:
+    def _notify(
+        self,
+        title: str,
+        markdown: str,
+        template: str = "blue",
+    ) -> tuple[bool, str]:
         if not self.settings.feishu_webhook_url:
             return False, "disabled"
         card = {
@@ -249,7 +237,11 @@ class OperationalOrchestrator:
         ).all()
         expired = 0
         for order in orders:
-            if order.expires_at and now_utc >= self._as_utc(order.expires_at):
+            if (
+                order.status in EXPIRABLE_STATES
+                and order.expires_at
+                and now_utc >= self._as_utc(order.expires_at)
+            ):
                 try:
                     self.order_service.apply_event(
                         order,
@@ -266,7 +258,10 @@ class OperationalOrchestrator:
     def _morning_brief(self, now_utc: datetime) -> tuple[str, dict[str, Any]]:
         day = self._business_date(now_utc)
         if not self._is_open_day(day):
-            return "SKIPPED", {"reason": "CN_MARKET_CLOSED", "business_date": day.isoformat()}
+            return "SKIPPED", {
+                "reason": "CN_MARKET_CLOSED",
+                "business_date": day.isoformat(),
+            }
 
         expired = self._expire_stale_candidates(now_utc)
         quality_counts = self._quality_counts(now_utc)
@@ -358,7 +353,11 @@ class OperationalOrchestrator:
                 continue
 
             summary["seen"] += 1
-            if order.expires_at and now_utc >= self._as_utc(order.expires_at):
+            if (
+                order.status in EXPIRABLE_STATES
+                and order.expires_at
+                and now_utc >= self._as_utc(order.expires_at)
+            ):
                 try:
                     self.order_service.apply_event(
                         order,
@@ -369,7 +368,11 @@ class OperationalOrchestrator:
                     self.db.commit()
                     summary["expired"] += 1
                     summary["orders"].append(
-                        {"order_id": order.id, "result": "EXPIRED", "fund_code": fund.code}
+                        {
+                            "order_id": order.id,
+                            "result": "EXPIRED",
+                            "fund_code": fund.code,
+                        }
                     )
                 except (InvalidTransition, StaleOrderVersion) as exc:
                     self.db.rollback()
@@ -477,7 +480,10 @@ class OperationalOrchestrator:
     def _early_cutoff(self, now_utc: datetime) -> tuple[str, dict[str, Any]]:
         day = self._business_date(now_utc)
         if not self._is_open_day(day):
-            return "SKIPPED", {"reason": "CN_MARKET_CLOSED", "business_date": day.isoformat()}
+            return "SKIPPED", {
+                "reason": "CN_MARKET_CLOSED",
+                "business_date": day.isoformat(),
+            }
 
         funds = self.db.scalars(select(Fund).order_by(Fund.cut_off_time, Fund.code)).all()
         early_funds = [fund for fund in funds if self._is_early_cutoff(fund, day)]
@@ -529,7 +535,10 @@ class OperationalOrchestrator:
     def _decision_window(self, now_utc: datetime) -> tuple[str, dict[str, Any]]:
         day = self._business_date(now_utc)
         if not self._is_open_day(day):
-            return "SKIPPED", {"reason": "CN_MARKET_CLOSED", "business_date": day.isoformat()}
+            return "SKIPPED", {
+                "reason": "CN_MARKET_CLOSED",
+                "business_date": day.isoformat(),
+            }
 
         quality_counts = self._quality_counts(now_utc)
         processing = self._process_candidate_orders(now_utc, early_only=False)
@@ -548,7 +557,10 @@ class OperationalOrchestrator:
     def _month_end_probe(self, now_utc: datetime) -> tuple[str, dict[str, Any]]:
         day = self._business_date(now_utc)
         if not self._is_open_day(day):
-            return "SKIPPED", {"reason": "CN_MARKET_CLOSED", "business_date": day.isoformat()}
+            return "SKIPPED", {
+                "reason": "CN_MARKET_CLOSED",
+                "business_date": day.isoformat(),
+            }
         if self.calendar.next_open_day(day, "CN").month == day.month:
             return "SKIPPED", {
                 "reason": "NOT_LAST_TRADING_DAY_OF_MONTH",
@@ -575,8 +587,7 @@ class OperationalOrchestrator:
                 )
             ).all()
             pending_items = [
-                f"订单 {order.id} 仍处于 {order.status.value}"
-                for order in pending_orders
+                f"订单 {order.id} 仍处于 {order.status.value}" for order in pending_orders
             ]
             report = reporter.monthly_report(
                 account.id,
