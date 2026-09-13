@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     research_dossier_max_materials: int = 12
     research_dossier_max_chars: int = 80_000
 
+    # V1.3 Phase 8: registered real fund-data JSON connectors. Secrets are named
+    # by connectors but loaded only from process environment at request time.
+    fund_data_timeout_seconds: float = 15.0
+    fund_data_max_bytes: int = 5_000_000
+    fund_data_max_redirects: int = 3
+    fund_data_max_funds_per_sync: int = 5000
+    fund_data_connector_batch_size: int = 20
+    fund_data_allow_http: bool = False
+
     risk_profile_valid_days: int = 365
     nav_red_after_hours: int = 72
     nav_yellow_after_hours: int = 36
@@ -140,6 +149,16 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "RESEARCH_DOSSIER_MAX_CHARS must be positive and <= AI_MAX_SOURCE_CHARS"
             )
+        if self.fund_data_timeout_seconds <= 0:
+            raise RuntimeError("FUND_DATA_TIMEOUT_SECONDS must be > 0")
+        if self.fund_data_max_bytes < 1024:
+            raise RuntimeError("FUND_DATA_MAX_BYTES must be >= 1024")
+        if self.fund_data_max_redirects < 0:
+            raise RuntimeError("FUND_DATA_MAX_REDIRECTS must be >= 0")
+        if self.fund_data_max_funds_per_sync < 1:
+            raise RuntimeError("FUND_DATA_MAX_FUNDS_PER_SYNC must be >= 1")
+        if self.fund_data_connector_batch_size < 1:
+            raise RuntimeError("FUND_DATA_CONNECTOR_BATCH_SIZE must be >= 1")
         if not 0 < self.max_single_fund_weight <= 1:
             raise RuntimeError("MAX_SINGLE_FUND_WEIGHT must be in (0, 1]")
         if not 0 < self.max_daily_trade_ratio <= 1:
