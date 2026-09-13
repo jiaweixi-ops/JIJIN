@@ -53,6 +53,11 @@ class ResearchMetricsService:
                 worst = drawdown
         return float(worst)
 
+    @staticmethod
+    def _money(value: Decimal) -> str:
+        """Serialize account money deterministically at the ledger's 4-decimal scale."""
+        return format(Decimal(value).quantize(Decimal("0.0001")), "f")
+
     def snapshot(self, fund: Fund, account: Account) -> dict:
         rows = self.db.scalars(
             select(NavConfirm)
@@ -69,9 +74,9 @@ class ResearchMetricsService:
             "source": "python_deterministic",
             "fund_code": fund.code,
             "confirmed_nav_count": len(rows),
-            "available_cash": str(account.available_cash),
-            "frozen_cash": str(account.frozen_cash),
-            "cash_in_transit": str(account.in_transit_cash),
+            "available_cash": self._money(account.available_cash),
+            "frozen_cash": self._money(account.frozen_cash),
+            "cash_in_transit": self._money(account.in_transit_cash),
         }
         if not rows:
             result["insufficient_nav_history"] = True
