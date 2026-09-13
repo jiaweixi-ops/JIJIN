@@ -68,12 +68,7 @@ def _parse_decimal(value: Any, *, name: str, allow_none: bool = False) -> Decima
 
 
 class SafeFundDataFetcher:
-    """Fetch only explicitly registered public JSON endpoints.
-
-    The endpoint itself is persisted in FundDataConnector. Redirect targets are
-    revalidated on every hop. Secrets are never stored in the database: a connector
-    may only name an environment variable whose value is injected at request time.
-    """
+    """Fetch only explicitly registered public JSON endpoints."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -232,8 +227,9 @@ class FundDataSyncService:
         return connector
 
     @staticmethod
-    def _payload_hash(row: dict[str, Any]) -> str:
-        normalized = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    def _payload_hash(row: dict[str, Any], observed_at: datetime) -> str:
+        payload = {"observed_at": _utc(observed_at).isoformat(), "row": row}
+        normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
     def _fund(self, row: dict[str, Any], source: DataSource) -> Fund:
@@ -297,22 +293,27 @@ class FundDataSyncService:
             return
         if not isinstance(rules, dict):
             raise ValueError("rules must be an object")
-        snapshot = FundRuleSnapshot(
-            source_name=source.name,
-            observed_at=observed_at,
-            subscription_open=bool(rules.get("subscription_open", False)),
-            redemption_open=bool(rules.get("redemption_open", False)),
-            purchase_limit=_parse_decimal(
-                rules.get("purchase_limit"), name="purchase_limit", allow_none=True
+        self.rules.ingest_fund_rules(
+            fund,
+            FundRuleSnapshot(
+                source_name=source.name,
+                observed_at=observed_at,
+                subscription_open=bool(rules.get("subscription_open", False)),
+                redemption_open=bool(rules.get("redemption_open", False)),
+                purchase_limit=_parse_decimal(
+                    rules.get("purchase_limit"), name="purchase_limit", allow_none=True
+                ),
+                fee_version=str(rules.get("fee_version") or ""),
+                fee_version_changed_unresolved=bool(
+                    rules.get("fee_version_changed_unresolved", False)
+                ),
+                announcement_fetch_ok=bool(rules.get("announcement_fetch_ok", True)),
+                missing_critical_fields=[
+                    str(item) for item in rules.get("missing_critical_fields", [])
+                ],
             ),
-            fee_version=str(rules.get("fee_version") or ""),
-            fee_version_changed_unresolved=bool(
-                rules.get("fee_version_changed_unresolved", False)
-            ),
-            announcement_fetch_ok=bool(rules.get("announcement_fetch_ok", True)),
-            missing_critical_fields=[str(item) for item in rules.get("missing_critical_fields", [])],
+            actor_id=None,
         )
-        self.rules.ingest_fund_rules(fund, snapshot, actor_id=None)
 
     def _ingest_nav(
         self,
@@ -370,6 +371,8 @@ class FundDataSyncService:
         )
         effective = True
         conflict = False
+        existing_nav = str(existing.nav) if existing is not None else None
+        existing_source_name = existing.source if existing is not None else None
         if existing is not None and Decimal(existing.nav) != value:
             conflict = True
             existing_source = self.db.scalar(
@@ -377,24 +380,7 @@ class FundDataSyncService:
             )
             existing_priority = existing_source.priority if existing_source else 10_000
             effective = source.priority < existing_priority
-            self.db.add(
-                DataQuality(
-                    entity_type="fund",
-                    entity_id=fund.id,
-                    field_name="nav_conflict",
-                    level=DataQualityLevel.RED,
-                    observed_at=nav_observed_at,
-                    source=source.name,
-                    details={
-                        "nav_date": nav_date.isoformat(),
-                        "incoming_nav": str(value),
-                        "existing_nav": str(existing.nav),
-                        "incoming_source": source.name,
-                        "existing_source": existing.source,
-                        "effective": effective,
-                    },
-                )
-            )
+
         if existing is None:
             existing = NavConfirm(
                 fund_id=fund.id,
@@ -410,6 +396,26 @@ class FundDataSyncService:
             existing.confirmed = True
             existing.source = source.name
             existing.observed_at = nav_observed_at
+
+        self.db.add(
+            DataQuality(
+                entity_type="fund",
+                entity_id=fund.id,
+                field_name="nav_conflict",
+                level=DataQualityLevel.RED if conflict else DataQualityLevel.GREEN,
+                observed_at=nav_observed_at,
+                source=source.name,
+                details={
+                    "nav_date": nav_date.isoformat(),
+                    "conflict": conflict,
+                    "incoming_nav": str(value),
+                    "existing_nav": existing_nav,
+                    "incoming_source": source.name,
+                    "existing_source": existing_source_name,
+                    "effective": effective,
+                },
+            )
+        )
         self.db.add(
             DataQuality(
                 entity_type="fund",
@@ -437,7 +443,7 @@ class FundDataSyncService:
         default_observed_at: datetime,
     ) -> tuple[bool, str]:
         observed_at = _parse_datetime(row.get("observed_at"), fallback=default_observed_at)
-        payload_hash = self._payload_hash(row)
+        payload_hash = self._payload_hash(row, observed_at)
         duplicate = self.db.scalar(
             select(FundDataObservation).where(
                 FundDataObservation.connector_id == connector.id,
@@ -462,10 +468,12 @@ class FundDataSyncService:
         self.db.add(observation)
         self.db.flush()
         try:
-            fund = self._fund(row, source)
+            with self.db.begin_nested():
+                fund = self._fund(row, source)
+                self._ingest_rules(fund, row, source, observed_at)
+                self._ingest_nav(fund, row, source, observed_at)
+                self.db.flush()
             observation.fund_id = fund.id
-            self._ingest_rules(fund, row, source, observed_at)
-            self._ingest_nav(fund, row, source, observed_at)
             observation.accepted = True
             return True, "accepted"
         except Exception as exc:
