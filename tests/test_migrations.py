@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, inspect, text
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAD = "20260912_02"
+HEAD = "20260913_01"
 
 
 def _config(database_url: str) -> Config:
@@ -30,10 +30,13 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
     assert "orders" in inspector.get_table_names()
     assert "feishu_callback" in inspector.get_table_names()
     assert "ai_usage_ledger" in inspector.get_table_names()
+    assert "operational_run" in inspector.get_table_names()
     callback_columns = {column["name"] for column in inspector.get_columns("feishu_callback")}
     assert "status_code" in callback_columns
     credential_columns = {column["name"] for column in inspector.get_columns("api_credential")}
     assert {"hash_version", "expires_at", "revoked_at", "rotated_from_id"} <= credential_columns
+    operational_columns = {column["name"] for column in inspector.get_columns("operational_run")}
+    assert {"job_name", "business_date", "status", "attempt", "summary"} <= operational_columns
     with engine.connect() as connection:
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == HEAD
 
@@ -70,6 +73,7 @@ def test_alembic_adopts_legacy_schema_and_backfills_callback_status(tmp_path):
     assert "status_code" in callback_columns
     assert "orders" in inspector.get_table_names()
     assert "ai_usage_ledger" in inspector.get_table_names()
+    assert "operational_run" in inspector.get_table_names()
     with engine.connect() as connection:
         status_code = connection.execute(
             text("SELECT status_code FROM feishu_callback WHERE event_id='legacy-event'")
