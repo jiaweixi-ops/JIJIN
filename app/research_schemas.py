@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -28,7 +27,6 @@ class ResearchInboxCreate(BaseModel):
     topic: str = Field(min_length=1, max_length=300)
     idempotency_key: str = Field(min_length=8, max_length=128)
     materials: list[ResearchMaterialIn] = Field(min_length=1, max_length=20)
-    python_metrics: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("topic")
     @classmethod
