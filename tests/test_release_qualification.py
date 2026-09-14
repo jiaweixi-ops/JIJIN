@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from app.config import Settings
 from app.enums import AccountType, ReconciliationStatus, Role
 from app.models import Account, Reconciliation, ReconciliationDiff, User
-from app.operational_models import OperationalAlert
+from app.operational_models import OperationalAlert, OperationalRun
 from app.qualification_models import ReleaseQualificationRun
 from app.services.release_qualification import ReleaseQualificationService
 from app.snapshot_models import PortfolioSnapshot
@@ -93,6 +93,13 @@ def _seed_snapshots(db, account_id: str, dates: list[date]) -> None:
     db.commit()
 
 
+def _seed_clean_window(db) -> Account:
+    account = _seed_account(db)
+    _seed_engineering_ready(db, datetime(2026, 8, 1, 12, tzinfo=timezone.utc))
+    _seed_snapshots(db, account.id, _weekday_dates(date(2026, 8, 3), date(2026, 8, 28)))
+    return account
+
+
 def test_engineering_rehearsal_passes_only_on_current_migrated_schema(tmp_path):
     database = tmp_path / "qualification.db"
     url = f"sqlite:///{database.as_posix()}"
@@ -157,10 +164,7 @@ def test_field_gate_requires_full_30_calendar_and_20_business_day_window(db):
 
 
 def test_field_gate_reaches_release_ready_only_with_clean_server_derived_evidence(db):
-    account = _seed_account(db)
-    _seed_engineering_ready(db, datetime(2026, 8, 1, 12, tzinfo=timezone.utc))
-    open_days = _weekday_dates(date(2026, 8, 3), date(2026, 8, 28))
-    _seed_snapshots(db, account.id, open_days)
+    account = _seed_clean_window(db)
     service = ReleaseQualificationService(db, Settings(app_env="test"))
 
     result = service.field_result(now=datetime(2026, 8, 30, 15, tzinfo=timezone.utc))
@@ -173,17 +177,17 @@ def test_field_gate_reaches_release_ready_only_with_clean_server_derived_evidenc
     persisted = service.run_field_gate(now=datetime(2026, 8, 30, 15, tzinfo=timezone.utc))
     assert persisted.status == "RELEASE_READY"
     assert persisted.blocker_count == 0
+    assert persisted.enabled_account_count == 1
+    assert persisted.checks["business_days_by_account"][account.id] == 20
 
 
-def test_field_gate_is_fail_closed_on_active_critical_alert(db):
-    account = _seed_account(db)
-    _seed_engineering_ready(db, datetime(2026, 8, 1, 12, tzinfo=timezone.utc))
-    _seed_snapshots(db, account.id, _weekday_dates(date(2026, 8, 3), date(2026, 8, 28)))
+def test_field_gate_is_fail_closed_on_release_blocking_alert(db):
+    account = _seed_clean_window(db)
     seen = datetime(2026, 8, 30, 12)
     db.add(
         OperationalAlert(
             dedupe_key=f"account:{account.id}:qualification:blocker",
-            alert_type="TEST_BLOCKER",
+            alert_type="SOFT_RESERVED_CASH_EXCEEDS_AVAILABLE",
             severity="CRITICAL",
             state="OPEN",
             scope_type="account",
@@ -205,15 +209,88 @@ def test_field_gate_is_fail_closed_on_active_critical_alert(db):
 
     assert result.status == "FIELD_OBSERVATION_PENDING"
     assert any(
-        row["code"] == "ACTIVE_HIGH_OR_CRITICAL_OPERATIONAL_ALERT"
+        row["code"] == "ACTIVE_RELEASE_BLOCKING_OPERATIONAL_ALERT"
         for row in result.blockers
     )
 
 
+def test_market_risk_alert_and_partial_delivery_run_do_not_poison_release(db):
+    account = _seed_clean_window(db)
+    seen = datetime(2026, 8, 20, 12)
+    db.add(
+        OperationalAlert(
+            dedupe_key=f"account:{account.id}:portfolio:drawdown_limit_reached",
+            alert_type="DRAWDOWN_LIMIT_REACHED",
+            severity="HIGH",
+            state="OPEN",
+            scope_type="account",
+            scope_id=account.id,
+            title="drawdown",
+            message="risk state, not a release defect",
+            details={},
+            occurrence_count=1,
+            first_seen_at=seen,
+            last_seen_at=seen,
+            created_at=seen,
+            updated_at=seen,
+        )
+    )
+    db.add(
+        OperationalRun(
+            job_name="morning_brief",
+            business_date=date(2026, 8, 20),
+            trigger="scheduler",
+            status="PARTIAL",
+            attempt=1,
+            scheduled_for=seen,
+            started_at=seen,
+            finished_at=seen,
+            summary={"notification_errors": ["temporary Feishu delivery error"]},
+            error="",
+            created_at=seen,
+            updated_at=seen,
+        )
+    )
+    db.commit()
+    service = ReleaseQualificationService(db, Settings(app_env="test"))
+
+    result = service.field_result(now=datetime(2026, 8, 30, 15, tzinfo=timezone.utc))
+
+    assert result.status == "RELEASE_READY"
+    assert result.checks["active_release_blocking_alerts"] == 0
+    assert result.checks["failed_operational_runs"] == 0
+
+
+def test_failed_operational_run_blocks_release(db):
+    _seed_clean_window(db)
+    seen = datetime(2026, 8, 20, 12)
+    db.add(
+        OperationalRun(
+            job_name="decision_window",
+            business_date=date(2026, 8, 20),
+            trigger="scheduler",
+            status="FAILED",
+            attempt=1,
+            scheduled_for=seen,
+            started_at=seen,
+            finished_at=seen,
+            summary={"exception_type": "RuntimeError"},
+            error="deterministic processing failed",
+            created_at=seen,
+            updated_at=seen,
+        )
+    )
+    db.commit()
+    service = ReleaseQualificationService(db, Settings(app_env="test"))
+
+    result = service.field_result(now=datetime(2026, 8, 30, 15, tzinfo=timezone.utc))
+
+    assert result.status == "FIELD_OBSERVATION_PENDING"
+    assert any(row["code"] == "UNRESOLVED_FAILED_OPERATIONAL_RUN" for row in result.blockers)
+
+
 def test_field_gate_is_fail_closed_on_unresolved_blocking_reconciliation_diff(db):
-    account = _seed_account(db)
-    _seed_engineering_ready(db, datetime(2026, 8, 1, 12, tzinfo=timezone.utc))
-    _seed_snapshots(db, account.id, _weekday_dates(date(2026, 8, 3), date(2026, 8, 28)))
+    account = _seed_clean_window(db)
     reconciliation = Reconciliation(
         account_id=account.id,
         reconcile_date=date(2026, 8, 28),
@@ -250,9 +327,7 @@ def test_field_gate_is_fail_closed_on_unresolved_blocking_reconciliation_diff(db
 
 
 def test_field_gate_has_no_manual_override_and_live_trading_blocks(db):
-    account = _seed_account(db)
-    _seed_engineering_ready(db, datetime(2026, 8, 1, 12, tzinfo=timezone.utc))
-    _seed_snapshots(db, account.id, _weekday_dates(date(2026, 8, 3), date(2026, 8, 28)))
+    _seed_clean_window(db)
     service = ReleaseQualificationService(
         db,
         Settings(app_env="test", live_trading_enabled=True),
