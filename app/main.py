@@ -13,6 +13,7 @@ from app.api import (
     decisions,
     dossiers,
     feishu,
+    field_operations,
     fund_data,
     health,
     operations,
@@ -79,5 +80,6 @@ app.include_router(dossiers.router)
 app.include_router(reviews.router)
 app.include_router(reviews.management_router)
 app.include_router(qualification.router)
+app.include_router(field_operations.router)
 app.include_router(operations.router)
 app.include_router(feishu.router)
