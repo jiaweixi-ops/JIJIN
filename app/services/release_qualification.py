@@ -46,7 +46,14 @@ class ReleaseQualificationService:
     MIN_CALENDAR_DAYS = 30
     MIN_BUSINESS_DAYS = 20
     ACTIVE_ALERT_STATES = ("OPEN", "ACKNOWLEDGED")
-    RELEASE_BLOCKING_ALERT_SEVERITIES = ("HIGH", "CRITICAL")
+    # Release qualification blocks on data/accounting integrity defects. Market-risk
+    # states such as drawdown/loss-streak remain visible alerts but are not software
+    # release defects and therefore cannot permanently poison a field-observation run.
+    RELEASE_BLOCKING_ALERT_TYPES = (
+        "SOFT_RESERVED_CASH_EXCEEDS_AVAILABLE",
+        "MISSING_CONFIRMED_NAV",
+        "RECONCILIATION_BLOCKING",
+    )
 
     def __init__(self, db: Session, settings: Settings):
         self.db = db
@@ -166,7 +173,9 @@ class ReleaseQualificationService:
         if self.settings.live_trading_enabled:
             blockers.append({"code": "LIVE_TRADING_MUST_REMAIN_DISABLED"})
         if convert_orders:
-            blockers.append({"code": "UNSUPPORTED_CONVERT_ORDER_PRESENT", "count": int(convert_orders)})
+            blockers.append(
+                {"code": "UNSUPPORTED_CONVERT_ORDER_PRESENT", "count": int(convert_orders)}
+            )
         if future_nav:
             blockers.append({"code": "FUTURE_CONFIRMED_NAV_PRESENT", "count": int(future_nav)})
         if negative_cash_accounts:
@@ -294,7 +303,7 @@ class ReleaseQualificationService:
 
         alert_stmt = select(func.count(OperationalAlert.id)).where(
             OperationalAlert.state.in_(self.ACTIVE_ALERT_STATES),
-            OperationalAlert.severity.in_(self.RELEASE_BLOCKING_ALERT_SEVERITIES),
+            OperationalAlert.alert_type.in_(self.RELEASE_BLOCKING_ALERT_TYPES),
         )
         if account_ids:
             alert_stmt = alert_stmt.where(
@@ -303,12 +312,12 @@ class ReleaseQualificationService:
                     OperationalAlert.scope_id.in_(account_ids),
                 )
             )
-        active_blocking_alerts = self.db.scalar(alert_stmt) or 0
-        if active_blocking_alerts:
+        active_release_blocking_alerts = self.db.scalar(alert_stmt) or 0
+        if active_release_blocking_alerts:
             blockers.append(
                 {
-                    "code": "ACTIVE_HIGH_OR_CRITICAL_OPERATIONAL_ALERT",
-                    "count": int(active_blocking_alerts),
+                    "code": "ACTIVE_RELEASE_BLOCKING_OPERATIONAL_ALERT",
+                    "count": int(active_release_blocking_alerts),
                 }
             )
 
@@ -325,19 +334,26 @@ class ReleaseQualificationService:
             ) or 0
         if unresolved_diffs:
             blockers.append(
-                {"code": "UNRESOLVED_BLOCKING_RECONCILIATION_DIFF", "count": int(unresolved_diffs)}
+                {
+                    "code": "UNRESOLVED_BLOCKING_RECONCILIATION_DIFF",
+                    "count": int(unresolved_diffs),
+                }
             )
 
+        # A PARTIAL run can mean a non-critical delivery problem (for example a
+        # Feishu card failed after the deterministic business work completed).
+        # Historical transient delivery errors must not permanently poison a fixed
+        # field epoch; true FAILED operational runs remain release blockers.
         failed_runs = self.db.scalar(
             select(func.count(OperationalRun.id)).where(
                 OperationalRun.business_date >= start_date,
                 OperationalRun.business_date <= local_today,
-                OperationalRun.status.in_(["FAILED", "PARTIAL"]),
+                OperationalRun.status == "FAILED",
             )
         ) or 0
         if failed_runs:
             blockers.append(
-                {"code": "UNRESOLVED_FAILED_OR_PARTIAL_OPERATIONAL_RUN", "count": int(failed_runs)}
+                {"code": "UNRESOLVED_FAILED_OPERATIONAL_RUN", "count": int(failed_runs)}
             )
 
         mature_pending_reviews = 0
@@ -356,9 +372,10 @@ class ReleaseQualificationService:
 
         checks.update(
             {
-                "active_high_or_critical_alerts": int(active_blocking_alerts),
+                "release_blocking_alert_types": list(self.RELEASE_BLOCKING_ALERT_TYPES),
+                "active_release_blocking_alerts": int(active_release_blocking_alerts),
                 "unresolved_blocking_reconciliation_diffs": int(unresolved_diffs),
-                "failed_or_partial_operational_runs": int(failed_runs),
+                "failed_operational_runs": int(failed_runs),
                 "mature_pending_decision_reviews": int(mature_pending_reviews),
             }
         )
