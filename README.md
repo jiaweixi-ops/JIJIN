@@ -164,8 +164,8 @@ V1.3 日配额仍是个人低并发场景的 best-effort `查累计 -> 判断 ->
 08:45  morning_brief
 12:45  research_collection_predecision
 13:00  research_dossiers
+13:10  fund_data_predecision
 13:15  research_pipeline
-13:20  fund_data_predecision
 13:30  early_cutoff
 14:00  decision_window
 18:00  fund_data_postclose
@@ -181,7 +181,7 @@ V1.3 日配额仍是个人低并发场景的 best-effort `查累计 -> 判断 ->
 08:00-23:30 / 30min  operational_alerts
 ```
 
-APScheduler 只负责触发；交易日、业务日、幂等、DataQuality、订单状态和人工确认边界都由业务层重新校验。
+`fund_data_predecision` 明确位于 13:15 Research Pipeline **之前**，避免 DataQualityGate 在研究模型调用前仍依赖 07:45 的规则/NAV 观察。APScheduler 只负责触发；交易日、业务日、幂等、DataQuality、订单状态和人工确认边界都由业务层重新校验。
 
 ## RC Field Observation
 
