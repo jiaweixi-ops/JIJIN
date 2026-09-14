@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, inspect, text
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAD = "20260913_07"
+HEAD = "20260914_01"
 
 
 def _config(database_url: str) -> Config:
@@ -46,6 +46,7 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
         "decision_review",
         "ai_contribution_score",
         "management_report",
+        "release_qualification_run",
     } <= tables
     callback_columns = {column["name"] for column in inspector.get_columns("feishu_callback")}
     assert "status_code" in callback_columns
@@ -152,6 +153,23 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
         "confirmed_period_pnl",
         "summary",
     } <= report_columns
+    qualification_columns = {
+        column["name"] for column in inspector.get_columns("release_qualification_run")
+    }
+    assert {
+        "release_version",
+        "mode",
+        "status",
+        "suite_version",
+        "observed_start_date",
+        "observed_end_date",
+        "calendar_days",
+        "min_business_days",
+        "enabled_account_count",
+        "blocker_count",
+        "checks",
+        "blockers",
+    } <= qualification_columns
     with engine.connect() as connection:
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == HEAD
 
@@ -203,6 +221,7 @@ def test_alembic_adopts_legacy_schema_and_backfills_callback_status(tmp_path):
         "decision_review",
         "ai_contribution_score",
         "management_report",
+        "release_qualification_run",
     } <= tables
     document_columns = {
         column["name"] for column in inspector.get_columns("research_collected_document")

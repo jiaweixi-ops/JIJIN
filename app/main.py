@@ -18,6 +18,7 @@ from app.api import (
     operations,
     orders,
     portfolio,
+    qualification,
     reconciliation,
     research,
     reviews,
@@ -44,9 +45,11 @@ async def lifespan(app: FastAPI):
     )
     verify_schema_current()
     try:
+        from app.services.qualification_scheduler import install_qualification_job
         from app.services.scheduler import build_scheduler
 
         _scheduler = build_scheduler()
+        install_qualification_job(_scheduler)
         _scheduler.start()
     except Exception as exc:
         log.exception("scheduler unavailable: %s", exc)
@@ -58,7 +61,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AI 场外基金公司",
     version=__version__,
-    description="个人研究 / 前瞻模拟盘。V1.3 接入可信研究与基金数据、多源研究档案、前瞻决策复盘与每日运行编排；不接自动实盘。",
+    description="个人研究 / 前瞻模拟盘。V1.3 接入可信研究与基金数据、多源研究档案、前瞻决策复盘、发布资格闸门与每日运行编排；不接自动实盘。",
     lifespan=lifespan,
 )
 install_observability(app)
@@ -75,5 +78,6 @@ app.include_router(collection.router)
 app.include_router(dossiers.router)
 app.include_router(reviews.router)
 app.include_router(reviews.management_router)
+app.include_router(qualification.router)
 app.include_router(operations.router)
 app.include_router(feishu.router)

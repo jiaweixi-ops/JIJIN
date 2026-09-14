@@ -10,6 +10,7 @@ from app import (  # noqa: F401
     hardening_models,
     models,
     operational_models,
+    qualification_models,
     research_models,
     review_models,
     security_models,
