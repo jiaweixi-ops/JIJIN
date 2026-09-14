@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.enums import OrderSide, OrderStatus, ReconciliationStatus
+from app.enums import OrderSide, OrderStatus
 from app.hardening_models import AIUsageLedger
 from app.models import AuditLog, Fund, ModelCallLog, NavConfirm, Order, Reconciliation, ReconciliationDiff
 from app.operational_models import OperationalAlert
@@ -41,9 +41,14 @@ class ReviewManagementService:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
-    @staticmethod
-    def _db_day_bounds(start: date, end: date) -> tuple[datetime, datetime]:
-        return datetime.combine(start, time.min), datetime.combine(end + timedelta(days=1), time.min)
+    def _db_day_bounds(self, start: date, end: date) -> tuple[datetime, datetime]:
+        """Return naive UTC DB bounds for local business dates."""
+        local_start = datetime.combine(start, time.min, tzinfo=self.tz)
+        local_end = datetime.combine(end + timedelta(days=1), time.min, tzinfo=self.tz)
+        return (
+            local_start.astimezone(timezone.utc).replace(tzinfo=None),
+            local_end.astimezone(timezone.utc).replace(tzinfo=None),
+        )
 
     def _local_date(self, value: datetime) -> date:
         return self._as_utc(value).astimezone(self.tz).date()
@@ -472,6 +477,7 @@ class ReviewManagementService:
         if period_end < period_start:
             raise ValueError("period_end must be >= period_start")
         now_utc = self._as_utc(now or datetime.now(timezone.utc))
+        start_dt, end_dt = self._db_day_bounds(period_start, period_end)
         rows = self._period_snapshot_rows(account_id, period_start, period_end)
         first = rows[0] if rows else None
         last = rows[-1] if rows else None
@@ -482,14 +488,16 @@ class ReviewManagementService:
         reviews = self.db.scalars(
             select(DecisionReview).where(
                 DecisionReview.account_id == account_id,
-                DecisionReview.decision_at >= datetime.combine(period_start, time.min),
-                DecisionReview.decision_at < datetime.combine(period_end + timedelta(days=1), time.min),
+                DecisionReview.decision_at >= start_dt,
+                DecisionReview.decision_at < end_dt,
             )
         ).all()
         resolved_trade = [
             row
             for row in reviews
-            if row.status == "RESOLVED" and row.action in self.TRADE_ACTIONS and row.directional_hit is not None
+            if row.status == "RESOLVED"
+            and row.action in self.TRADE_ACTIONS
+            and row.directional_hit is not None
         ]
         mature_pending = [
             row for row in reviews if row.status != "RESOLVED" and row.target_date <= period_end
@@ -503,8 +511,8 @@ class ReviewManagementService:
         orders = self.db.scalars(
             select(Order).where(
                 Order.account_id == account_id,
-                Order.requested_at >= datetime.combine(period_start, time.min),
-                Order.requested_at < datetime.combine(period_end + timedelta(days=1), time.min),
+                Order.requested_at >= start_dt,
+                Order.requested_at < end_dt,
             )
         ).all()
         order_statuses = Counter(row.status.value for row in orders)
@@ -513,8 +521,8 @@ class ReviewManagementService:
             select(OperationalAlert).where(
                 OperationalAlert.scope_type == "account",
                 OperationalAlert.scope_id == account_id,
-                OperationalAlert.first_seen_at >= datetime.combine(period_start, time.min),
-                OperationalAlert.first_seen_at < datetime.combine(period_end + timedelta(days=1), time.min),
+                OperationalAlert.first_seen_at >= start_dt,
+                OperationalAlert.first_seen_at < end_dt,
             )
         ).all()
         alert_severity = Counter(row.severity for row in alerts)
@@ -535,10 +543,10 @@ class ReviewManagementService:
                 Reconciliation.reconcile_date >= period_start,
                 Reconciliation.reconcile_date <= period_end,
                 ReconciliationDiff.blocking.is_(True),
+                ReconciliationDiff.resolved.is_(False),
             )
         ) or 0
 
-        start_dt, end_dt = self._db_day_bounds(period_start, period_end)
         ai_cost = self.db.scalar(
             select(func.coalesce(func.sum(AIUsageLedger.estimated_cost), 0)).where(
                 AIUsageLedger.created_at >= start_dt,
