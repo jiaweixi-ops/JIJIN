@@ -82,10 +82,11 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -e '.[dev]'
-      - name: Run Phase 10 deterministic fault/replay matrix
+      - name: Run release qualification and field-operation fault/replay matrix
         run: >-
           pytest -q
           tests/test_release_qualification.py
+          tests/test_field_operations.py
           tests/test_feishu.py
           tests/test_operational_orchestration.py
           tests/test_operational_alerts.py
@@ -100,3 +101,4 @@ jobs:
         run: |
           alembic upgrade head
           python scripts/release_qualification.py engineering
+          python scripts/field_operations.py status
