@@ -249,11 +249,12 @@ def build_scheduler():
         "misfire_grace_time": 600,
     }
 
-    # Trading rules and fund profiles arrive before research/risk windows. NAV
-    # updates continue after close; QDII/FOF may still legitimately settle later.
+    # Refresh trading rules/fund profiles before the 13:15 research pipeline so
+    # DataQualityGate evaluates current observations instead of relying on the
+    # 07:45 snapshot. NAV updates continue after close; QDII/FOF may still settle later.
     for job_id, hour, minute in [
         ("fund_data_premarket", 7, 45),
-        ("fund_data_predecision", 13, 20),
+        ("fund_data_predecision", 13, 10),
         ("fund_data_postclose", 18, 0),
         ("fund_data_presnapshot", 22, 15),
         ("fund_data_late", 23, 15),
