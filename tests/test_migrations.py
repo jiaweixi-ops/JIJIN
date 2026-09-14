@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, inspect, text
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAD = "20260913_06"
+HEAD = "20260913_07"
 
 
 def _config(database_url: str) -> Config:
@@ -43,6 +43,9 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
         "research_collection_run",
         "research_collected_document",
         "research_dossier",
+        "decision_review",
+        "ai_contribution_score",
+        "management_report",
     } <= tables
     callback_columns = {column["name"] for column in inspector.get_columns("feishu_callback")}
     assert "status_code" in callback_columns
@@ -111,6 +114,44 @@ def test_alembic_upgrade_head_creates_fresh_sqlite_schema(tmp_path):
         "material_count",
         "source_count",
     } <= dossier_columns
+    review_columns = {column["name"] for column in inspector.get_columns("decision_review")}
+    assert {
+        "research_item_id",
+        "order_id",
+        "horizon_days",
+        "target_date",
+        "reference_nav",
+        "resolved_nav",
+        "forward_return",
+        "directional_hit",
+        "calibration_error",
+        "execution_outcome",
+        "status",
+    } <= review_columns
+    score_columns = {column["name"] for column in inspector.get_columns("ai_contribution_score")}
+    assert {
+        "role_name",
+        "provider",
+        "period_start",
+        "period_end",
+        "sample_count",
+        "call_success_rate",
+        "directional_hit_rate",
+        "confidence_calibration_score",
+        "estimated_cost",
+        "total_score",
+    } <= score_columns
+    report_columns = {column["name"] for column in inspector.get_columns("management_report")}
+    assert {
+        "account_id",
+        "report_type",
+        "period_start",
+        "period_end",
+        "revision",
+        "status",
+        "confirmed_period_pnl",
+        "summary",
+    } <= report_columns
     with engine.connect() as connection:
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == HEAD
 
@@ -159,6 +200,9 @@ def test_alembic_adopts_legacy_schema_and_backfills_callback_status(tmp_path):
         "research_collection_run",
         "research_collected_document",
         "research_dossier",
+        "decision_review",
+        "ai_contribution_score",
+        "management_report",
     } <= tables
     document_columns = {
         column["name"] for column in inspector.get_columns("research_collected_document")
