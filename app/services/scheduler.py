@@ -20,6 +20,7 @@ from app.services.reporting import ReportService
 from app.services.research_collection import ResearchCollectionService
 from app.services.research_dossier import ResearchDossierService
 from app.services.research_pipeline import ResearchPipelineService
+from app.services.review_jobs import ReviewJobService
 from app.services.simulation_broker import SimulationBroker
 
 log = logging.getLogger(__name__)
@@ -164,6 +165,28 @@ def _portfolio_snapshot() -> None:
             log.exception("portfolio snapshot scheduler wrapper failed")
 
 
+def _decision_reviews() -> None:
+    settings = get_settings()
+    with SessionLocal() as db:
+        try:
+            summary = ReviewJobService(db, settings).refresh()
+            log.info("forward decision review refresh finished summary=%s", summary)
+        except Exception:
+            db.rollback()
+            log.exception("forward decision review scheduler wrapper failed")
+
+
+def _management_reports() -> None:
+    settings = get_settings()
+    with SessionLocal() as db:
+        try:
+            summary = ReviewJobService(db, settings).generate_due_reports()
+            log.info("management report scheduler wrapper finished summary=%s", summary)
+        except Exception:
+            db.rollback()
+            log.exception("management report scheduler wrapper failed")
+
+
 def _settle_due_cash() -> None:
     settings = get_settings()
     with SessionLocal() as db:
@@ -302,6 +325,20 @@ def build_scheduler():
         _portfolio_snapshot,
         CronTrigger(day_of_week="mon-fri", hour=23, minute=30),
         id="portfolio_snapshot_retry",
+        **common,
+    )
+    # Reviews are forward-only: they compare already persisted decisions with
+    # later confirmed NAV and never feed a strategy/prompt/risk auto-tuner.
+    scheduler.add_job(
+        _decision_reviews,
+        CronTrigger(day_of_week="mon-fri", hour=23, minute=35),
+        id="decision_reviews",
+        **common,
+    )
+    scheduler.add_job(
+        _management_reports,
+        CronTrigger(day_of_week="mon-fri", hour=23, minute=50),
+        id="management_reports",
         **common,
     )
 

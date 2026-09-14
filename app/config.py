@@ -65,19 +65,20 @@ class Settings(BaseSettings):
     research_collection_batch_size: int = 20
     research_collection_allow_http: bool = False
 
-    # V1.3 Phase 4: collapse automatically collected items into one fund/day dossier.
     research_dossier_lookback_hours: int = 72
     research_dossier_max_materials: int = 12
     research_dossier_max_chars: int = 80_000
 
-    # V1.3 Phase 8: registered real fund-data JSON connectors. Secrets are named
-    # by connectors but loaded only from process environment at request time.
     fund_data_timeout_seconds: float = 15.0
     fund_data_max_bytes: int = 5_000_000
     fund_data_max_redirects: int = 3
     fund_data_max_funds_per_sync: int = 5000
     fund_data_connector_batch_size: int = 20
     fund_data_allow_http: bool = False
+
+    # Forward outcome review horizons. These are observational evaluation windows,
+    # not a backtest engine and never trigger automatic strategy changes.
+    decision_review_horizons_days: str = "5,20,60"
 
     risk_profile_valid_days: int = 365
     nav_red_after_hours: int = 72
@@ -159,6 +160,16 @@ class Settings(BaseSettings):
             raise RuntimeError("FUND_DATA_MAX_FUNDS_PER_SYNC must be >= 1")
         if self.fund_data_connector_batch_size < 1:
             raise RuntimeError("FUND_DATA_CONNECTOR_BATCH_SIZE must be >= 1")
+        try:
+            review_horizons = [
+                int(token.strip())
+                for token in self.decision_review_horizons_days.split(",")
+                if token.strip()
+            ]
+        except ValueError as exc:
+            raise RuntimeError("DECISION_REVIEW_HORIZONS_DAYS must contain integers") from exc
+        if not review_horizons or any(value < 1 or value > 3650 for value in review_horizons):
+            raise RuntimeError("DECISION_REVIEW_HORIZONS_DAYS must be 1..3650 day values")
         if not 0 < self.max_single_fund_weight <= 1:
             raise RuntimeError("MAX_SINGLE_FUND_WEIGHT must be in (0, 1]")
         if not 0 < self.max_daily_trade_ratio <= 1:

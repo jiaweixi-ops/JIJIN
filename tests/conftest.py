@@ -11,6 +11,7 @@ from app import (  # noqa: F401
     models,
     operational_models,
     research_models,
+    review_models,
     security_models,
     snapshot_models,
 )
