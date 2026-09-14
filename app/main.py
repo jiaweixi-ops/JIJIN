@@ -45,9 +45,11 @@ async def lifespan(app: FastAPI):
     )
     verify_schema_current()
     try:
+        from app.services.qualification_scheduler import install_qualification_job
         from app.services.scheduler import build_scheduler
 
         _scheduler = build_scheduler()
+        install_qualification_job(_scheduler)
         _scheduler.start()
     except Exception as exc:
         log.exception("scheduler unavailable: %s", exc)
